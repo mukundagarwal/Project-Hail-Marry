@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Database (live data — keep out of source control)
+spices.db
+spices.db-shm
+spices.db-wal
+
+# Claude Code
+.claude.json
+
+# OS
+.DS_Store
+Thumbs.db
