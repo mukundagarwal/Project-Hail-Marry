@@ -4,13 +4,13 @@ Navigation: st.session_state.stock_page in ("home", "category")
 """
 
 import streamlit as st
-import sqlite3
+import psycopg2.errors
 import pandas as pd
 from datetime import date
 
-from utils.db import get_conn, ensure_schema, log_stock_change, purge_old_stock_history
+from utils.db import get_conn, get_shared_conn, ensure_schema, log_stock_change, purge_old_stock_history
 from utils.styles import APP_CSS, BRAND_BAR_HTML
-from utils.formatters import h
+from utils.formatters import h, fmt_inr
 
 LOCATIONS = ["Transport", "Shop", "Anandpuri"]
 
@@ -77,12 +77,18 @@ if st.session_state.stock_page == "home":
         '<div class="page-sub">Live inventory across all locations</div>',
         unsafe_allow_html=True)
 
-    conn = get_conn()
+    conn = get_shared_conn()
     try:
         n_cats   = conn.execute("SELECT COUNT(*) FROM stock_categories").fetchone()[0]
         n_goods  = conn.execute("SELECT COUNT(*) FROM stock_goods").fetchone()[0]
-        tot_bags = conn.execute("SELECT COALESCE(SUM(bags),0) FROM stock_levels").fetchone()[0]
-        tot_kg   = conn.execute("SELECT COALESCE(SUM(quantity_kg),0) FROM stock_levels").fetchone()[0]
+        _unid_bags = float(conn.execute(
+            "SELECT COALESCE(SUM(bags),0) FROM unidentified_stock").fetchone()[0])
+        _unid_kg   = float(conn.execute(
+            "SELECT COALESCE(SUM(quantity_kg),0) FROM unidentified_stock").fetchone()[0])
+        tot_bags = float(conn.execute(
+            "SELECT COALESCE(SUM(bags),0) FROM stock_levels").fetchone()[0]) + _unid_bags
+        tot_kg   = float(conn.execute(
+            "SELECT COALESCE(SUM(quantity_kg),0) FROM stock_levels").fetchone()[0]) + _unid_kg
 
         st.markdown(
             f'<div class="stat-row">'
@@ -91,9 +97,9 @@ if st.session_state.stock_page == "home":
             f'<div class="stat-pill"><span class="sp-label">Good Types</span>'
             f'<span class="sp-value">{int(n_goods)}</span></div>'
             f'<div class="stat-pill"><span class="sp-label">Total Bags</span>'
-            f'<span class="sp-value" style="color:#8dd87a">{int(tot_bags):,}</span></div>'
+            f'<span class="sp-value" style="color:#8dd87a">{tot_bags:,.0f}</span></div>'
             f'<div class="stat-pill"><span class="sp-label">Total Kgs</span>'
-            f'<span class="sp-value" style="color:#6a9fd4">{float(tot_kg):,.1f} Kg</span></div>'
+            f'<span class="sp-value" style="color:#6a9fd4">{tot_kg:,.1f} Kg</span></div>'
             f'</div>',
             unsafe_allow_html=True)
 
@@ -137,13 +143,20 @@ if st.session_state.stock_page == "home":
                     else:
                         try:
                             c2 = get_conn()
-                            c2.execute(
-                                "INSERT INTO stock_categories (category_name) VALUES (?)", (name,))
+                            _c2_row = c2.execute(
+                                "INSERT INTO stock_categories (category_name) VALUES (%s) RETURNING category_id", (name,))
+                            _c2_id = _c2_row.fetchone()["category_id"]
+                            for _loc in ["Transport", "Shop", "Anandpuri"]:
+                                c2.execute(
+                                    "INSERT INTO unidentified_stock "
+                                    "(category_id, location, bags, quantity_kg) VALUES (%s,%s,0,0) ON CONFLICT DO NOTHING",
+                                    (_c2_id, _loc))
                             c2.commit()
                             c2.close()
                             st.success(f"Added '{name}'")
                             st.rerun()
-                        except sqlite3.IntegrityError:
+                        except Exception:
+                            c2.rollback()
                             st.error(f"'{name}' already exists.")
 
         # Category cards
@@ -155,23 +168,41 @@ if st.session_state.stock_page == "home":
             totals = conn.execute("""
                 SELECT COALESCE(SUM(sl.bags),0), COALESCE(SUM(sl.quantity_kg),0)
                 FROM stock_goods sg
-                JOIN stock_levels sl ON sl.good_id = sg.good_id
-                WHERE sg.category_id = ?""", (cat_id,)).fetchone()
-            total_bags_cat = int(totals[0])
-            total_kg_cat   = float(totals[1])
+                LEFT JOIN stock_levels sl ON sl.good_id = sg.good_id
+                WHERE sg.category_id = %s""", (cat_id,)).fetchone()
+            _unid_cat = conn.execute(
+                "SELECT COALESCE(SUM(bags),0), COALESCE(SUM(quantity_kg),0) "
+                "FROM unidentified_stock WHERE category_id=%s",
+                (cat_id,)).fetchone()
+            total_bags_cat = float(totals[0]) + float(_unid_cat[0])
+            total_kg_cat   = float(totals[1]) + float(_unid_cat[1])
 
             loc_rows = conn.execute("""
                 SELECT sl.location,
                        COALESCE(SUM(sl.bags),0),
                        COALESCE(SUM(sl.quantity_kg),0)
                 FROM stock_goods sg
-                JOIN stock_levels sl ON sl.good_id = sg.good_id
-                WHERE sg.category_id = ?
+                LEFT JOIN stock_levels sl ON sl.good_id = sg.good_id
+                WHERE sg.category_id = %s
                 GROUP BY sl.location""", (cat_id,)).fetchall()
-            loc_map = {r[0]: (int(r[1]), float(r[2])) for r in loc_rows}
+            loc_map = {r[0]: (float(r[1]), float(r[2])) for r in loc_rows}
+
+            # Add unidentified stock into per-location map
+            _unid_loc_rows = conn.execute(
+                "SELECT location, bags, quantity_kg "
+                "FROM unidentified_stock WHERE category_id=%s",
+                (cat_id,)).fetchall()
+            for _ur in _unid_loc_rows:
+                _ul = _ur[0]
+                _ub = float(_ur[1] or 0)
+                _uk = float(_ur[2] or 0)
+                if _ul in loc_map:
+                    loc_map[_ul] = (loc_map[_ul][0] + _ub, loc_map[_ul][1] + _uk)
+                else:
+                    loc_map[_ul] = (_ub, _uk)
 
             n_goods_cat = conn.execute(
-                "SELECT COUNT(*) FROM stock_goods WHERE category_id=?",
+                "SELECT COUNT(*) FROM stock_goods WHERE category_id=%s",
                 (cat_id,)).fetchone()[0]
 
             loc_html = "".join(
@@ -181,7 +212,7 @@ if st.session_state.stock_page == "home":
                 f'<div style="font-size:0.65rem;color:{LOC_ACCENT[loc]["color"]};'
                 f'text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px">{loc}</div>'
                 f'<div style="font-size:0.9rem;font-weight:600;color:#e0d8c8">'
-                f'{loc_map.get(loc,(0,0.0))[0]:,} bags</div>'
+                f'{loc_map.get(loc,(0,0.0))[0]:,.0f} bags</div>'
                 f'<div style="font-size:0.75rem;color:#6a6050">'
                 f'{loc_map.get(loc,(0,0.0))[1]:,.1f} Kg</div>'
                 f'</div>'
@@ -201,7 +232,7 @@ if st.session_state.stock_page == "home":
                 f'</div>'
                 f'<div style="text-align:right">'
                 f'<div style="font-size:1.5rem;font-weight:700;color:#8dd87a">'
-                f'{total_bags_cat:,} bags</div>'
+                f'{total_bags_cat:,.0f} bags</div>'
                 f'<div style="font-size:0.85rem;color:#6a9fd4">'
                 f'{total_kg_cat:,.1f} Kg</div>'
                 f'</div></div>'
@@ -251,11 +282,11 @@ elif st.session_state.stock_page == "category":
         '<div class="page-sub">Location-wise inventory details</div>',
         unsafe_allow_html=True)
 
-    conn = get_conn()
+    conn = get_shared_conn()
     try:
         goods = conn.execute(
             "SELECT good_id, good_name FROM stock_goods "
-            "WHERE category_id=? ORDER BY good_name",
+            "WHERE category_id=%s ORDER BY good_name",
             (cat_id,)).fetchall()
         good_ids   = [g[0] for g in goods]
         good_names = [g[1] for g in goods]
@@ -265,7 +296,7 @@ elif st.session_state.stock_page == "category":
                    sl.bags, sl.quantity_kg
             FROM stock_goods sg
             JOIN stock_levels sl ON sl.good_id = sg.good_id
-            WHERE sg.category_id = ?
+            WHERE sg.category_id = %s
             ORDER BY sg.good_name, sl.location""",
             conn, params=(cat_id,))
 
@@ -298,61 +329,147 @@ elif st.session_state.stock_page == "category":
             total_bags_loc = int(df_loc["bags"].sum())
             total_kg_loc   = float(df_loc["quantity_kg"].sum())
 
+            # Unidentified stock for this location
+            _unid_row = conn.execute("""
+                SELECT bags, quantity_kg
+                FROM unidentified_stock
+                WHERE category_id = %s AND location = %s
+            """, (cat_id, loc)).fetchone()
+            _unid_bags = float(_unid_row["bags"] or 0) if _unid_row else 0.0
+            _unid_kg   = float(_unid_row["quantity_kg"] or 0) if _unid_row else 0.0
+
             with col_widget:
-                # Panel header
+                # Panel header (total includes unidentified)
+                _panel_bags = total_bags_loc + _unid_bags
+                _panel_kg   = total_kg_loc   + _unid_kg
                 st.markdown(
                     f'<div style="background:{acc["bg"]};border:1px solid {acc["border"]};'
                     f'border-radius:12px;padding:1rem 1.2rem;margin-bottom:0.8rem">'
                     f'<div style="font-family:\'Playfair Display\',serif;font-size:1.05rem;'
                     f'color:{acc["color"]};font-weight:700;margin-bottom:2px">{loc}</div>'
                     f'<div style="font-size:0.7rem;color:#4a4438">'
-                    f'{total_bags_loc:,} bags &nbsp;·&nbsp; {total_kg_loc:,.1f} Kg total'
+                    f'{_panel_bags:,.0f} bags &nbsp;·&nbsp; {_panel_kg:,.1f} Kg total'
                     f'</div></div>',
                     unsafe_allow_html=True)
 
-                # Goods table
-                rows_html = ""
-                for _, row in df_loc.iterrows():
-                    is_neg     = int(row["bags"]) < 0 or float(row["quantity_kg"]) < 0
-                    row_style  = 'background:#2a0808;' if is_neg else ''
-                    name_col   = '#ff8080'  if is_neg else '#c8bfa8'
-                    bags_col   = '#ff6060'  if is_neg else acc["color"]
-                    kg_col     = '#ff6060'  if is_neg else '#8a8070'
-                    alert_tag  = (
-                        ' <span style="font-size:0.6rem;background:#7a1a1a;color:#ffaaaa;'
-                        'border-radius:3px;padding:1px 5px;vertical-align:middle">NEG</span>'
-                    ) if is_neg else ''
-                    rows_html += (
-                        f'<tr style="{row_style}">'
-                        f'<td style="padding:5px 8px;color:{name_col};font-size:0.8rem">'
-                        f'{h(row["good_name"])}{alert_tag}</td>'
-                        f'<td style="padding:5px 8px;text-align:right;color:{bags_col};'
-                        f'font-size:0.8rem;font-weight:600">{int(row["bags"]):,}</td>'
-                        f'<td style="padding:5px 8px;text-align:right;color:{kg_col};'
-                        f'font-size:0.8rem">{float(row["quantity_kg"]):,.1f}</td>'
-                        f'</tr>'
-                    )
+                # Unidentified stock card — hidden when both values are zero
+                if _unid_bags != 0 or _unid_kg != 0:
+                    st.markdown(
+                        f'<div style="background:#1a1208;border:1px solid #4a3010;'
+                        f'border-radius:10px;padding:0.7rem 1rem;margin-bottom:0.8rem">'
+                        f'<div style="font-size:.7rem;color:#b89040;text-transform:uppercase;'
+                        f'letter-spacing:.1em;margin-bottom:4px">⚠ Unidentified Stock</div>'
+                        f'<div style="font-size:.88rem;color:#e0d0a0">'
+                        f'<b>{_unid_bags:,.0f}</b> bags &nbsp;·&nbsp; '
+                        f'<b>{_unid_kg:,.2f} kg</b></div>'
+                        f'<div style="font-size:.72rem;color:#6a5a30;margin-top:3px">'
+                        f'Category known · Specific good not yet identified</div></div>',
+                        unsafe_allow_html=True)
 
-                st.markdown(
-                    f'<table style="width:100%;border-collapse:collapse;margin-bottom:0.8rem">'
-                    f'<thead><tr style="border-bottom:1px solid #252318">'
-                    f'<th style="text-align:left;padding:4px 8px;font-size:0.63rem;'
-                    f'color:#3a3628;text-transform:uppercase;letter-spacing:0.1em">Good</th>'
-                    f'<th style="text-align:right;padding:4px 8px;font-size:0.63rem;'
-                    f'color:#3a3628;text-transform:uppercase;letter-spacing:0.1em">Bags</th>'
-                    f'<th style="text-align:right;padding:4px 8px;font-size:0.63rem;'
-                    f'color:#3a3628;text-transform:uppercase;letter-spacing:0.1em">Kg</th>'
-                    f'</tr></thead>'
-                    f'<tbody>{rows_html}</tbody>'
-                    f'<tfoot><tr style="border-top:1px solid #2a2820">'
-                    f'<td style="padding:6px 8px;font-size:0.8rem;font-weight:700;'
-                    f'color:#e8c97e">Total</td>'
-                    f'<td style="padding:6px 8px;text-align:right;font-size:0.8rem;'
-                    f'font-weight:700;color:{acc["color"]}">{total_bags_loc:,}</td>'
-                    f'<td style="padding:6px 8px;text-align:right;font-size:0.8rem;'
-                    f'font-weight:700;color:#6a9fd4">{total_kg_loc:,.1f}</td>'
-                    f'</tr></tfoot></table>',
-                    unsafe_allow_html=True)
+                # Edit button + form for unidentified stock
+                _unid_edit_key = f"unid_edit_{cat_id}_{loc}"
+                if _unid_edit_key not in st.session_state:
+                    st.session_state[_unid_edit_key] = False
+
+                if not st.session_state[_unid_edit_key]:
+                    if st.button("✏️ Edit Unidentified",
+                                 key=f"unid_btn_{cat_id}_{loc}",
+                                 use_container_width=True):
+                        st.session_state[_unid_edit_key] = True
+                        st.rerun()
+                else:
+                    with st.form(f"unid_form_{cat_id}_{loc}"):
+                        st.markdown("**Edit Unidentified Stock**")
+                        _new_ubags = st.number_input(
+                            "Bags", value=float(_unid_bags), step=1.0,
+                            key=f"unid_nb_{cat_id}_{loc}")
+                        _new_ukg   = st.number_input(
+                            "Weight (Kg)", value=float(_unid_kg), step=0.1,
+                            key=f"unid_nk_{cat_id}_{loc}")
+                        _uc1, _uc2 = st.columns(2)
+                        with _uc1:
+                            _usave = st.form_submit_button(
+                                "💾 Save", use_container_width=True)
+                        with _uc2:
+                            _ucancel = st.form_submit_button(
+                                "Cancel", use_container_width=True)
+                        if _ucancel:
+                            st.session_state[_unid_edit_key] = False
+                            st.rerun()
+                        if _usave:
+                            with conn:
+                                try:
+                                    log_stock_change(
+                                        conn, cat_name, "Unidentified",
+                                        loc, "Update",
+                                        _unid_bags, float(_new_ubags),
+                                        _unid_kg,   float(_new_ukg),
+                                        source="Manual update")
+                                except Exception:
+                                    pass
+                                conn.execute("""
+                                    UPDATE unidentified_stock
+                                       SET bags = %s, quantity_kg = %s
+                                     WHERE category_id = %s AND location = %s
+                                """, (round(float(_new_ubags), 2),
+                                      round(float(_new_ukg), 2),
+                                      cat_id, loc))
+                            st.session_state[_unid_edit_key] = False
+                            st.rerun()
+
+                # Goods table — hide zero-stock rows for display only
+                df_display = df_loc[
+                    (df_loc["bags"] != 0) | (df_loc["quantity_kg"] != 0)
+                ].copy()
+
+                if df_display.empty:
+                    st.markdown(
+                        '<div style="padding:1rem;color:#3a3628;'
+                        'font-size:.85rem;text-align:center">'
+                        '📦 No stock at this location.</div>',
+                        unsafe_allow_html=True)
+                else:
+                    rows_html = ""
+                    for _, row in df_display.iterrows():
+                        is_neg     = int(row["bags"]) < 0 or float(row["quantity_kg"]) < 0
+                        row_style  = 'background:#2a0808;' if is_neg else ''
+                        name_col   = '#ff8080'  if is_neg else '#c8bfa8'
+                        bags_col   = '#ff6060'  if is_neg else acc["color"]
+                        kg_col     = '#ff6060'  if is_neg else '#8a8070'
+                        alert_tag  = (
+                            ' <span style="font-size:0.6rem;background:#7a1a1a;color:#ffaaaa;'
+                            'border-radius:3px;padding:1px 5px;vertical-align:middle">NEG</span>'
+                        ) if is_neg else ''
+                        rows_html += (
+                            f'<tr style="{row_style}">'
+                            f'<td style="padding:5px 8px;color:{name_col};font-size:0.8rem">'
+                            f'{h(row["good_name"])}{alert_tag}</td>'
+                            f'<td style="padding:5px 8px;text-align:right;color:{bags_col};'
+                            f'font-size:0.8rem;font-weight:600">{int(row["bags"]):,}</td>'
+                            f'<td style="padding:5px 8px;text-align:right;color:{kg_col};'
+                            f'font-size:0.8rem">{float(row["quantity_kg"]):,.1f}</td>'
+                            f'</tr>'
+                        )
+                    st.markdown(
+                        f'<table style="width:100%;border-collapse:collapse;margin-bottom:0.8rem">'
+                        f'<thead><tr style="border-bottom:1px solid #252318">'
+                        f'<th style="text-align:left;padding:4px 8px;font-size:0.63rem;'
+                        f'color:#3a3628;text-transform:uppercase;letter-spacing:0.1em">Good</th>'
+                        f'<th style="text-align:right;padding:4px 8px;font-size:0.63rem;'
+                        f'color:#3a3628;text-transform:uppercase;letter-spacing:0.1em">Bags</th>'
+                        f'<th style="text-align:right;padding:4px 8px;font-size:0.63rem;'
+                        f'color:#3a3628;text-transform:uppercase;letter-spacing:0.1em">Kg</th>'
+                        f'</tr></thead>'
+                        f'<tbody>{rows_html}</tbody>'
+                        f'<tfoot><tr style="border-top:1px solid #2a2820">'
+                        f'<td style="padding:6px 8px;font-size:0.8rem;font-weight:700;'
+                        f'color:#e8c97e">Total</td>'
+                        f'<td style="padding:6px 8px;text-align:right;font-size:0.8rem;'
+                        f'font-weight:700;color:{acc["color"]}">{total_bags_loc:,}</td>'
+                        f'<td style="padding:6px 8px;text-align:right;font-size:0.8rem;'
+                        f'font-weight:700;color:#6a9fd4">{total_kg_loc:,.1f}</td>'
+                        f'</tr></tfoot></table>',
+                        unsafe_allow_html=True)
 
                 # Action buttons — toggle on click, close when same is clicked again
                 btn1, btn2 = st.columns(2)
@@ -377,16 +494,18 @@ elif st.session_state.stock_page == "category":
 
                 # ── Stock history expander ────────────────────────
                 with st.expander("📋 Stock History — last 30 days", expanded=False):
+                    from datetime import datetime as _dt30, timedelta as _td30
+                    _cutoff_30d = (_dt30.now() - _td30(days=30)).strftime("%Y-%m-%d %H:%M:%S")
                     df_hist = pd.read_sql("""
                         SELECT recorded_at, good_name, change_type,
                                bags_before, bags_after, bags_change,
                                kg_before, kg_after, kg_change, source
                         FROM stock_history
-                        WHERE category_name = ?
-                          AND location      = ?
-                          AND recorded_at  >= datetime('now', '-30 days')
+                        WHERE category_name = %s
+                          AND location      = %s
+                          AND recorded_at  >= %s
                         ORDER BY recorded_at DESC
-                    """, conn, params=(cat_name, loc))
+                    """, conn, params=(cat_name, loc, _cutoff_30d))
                     if df_hist.empty:
                         st.markdown(
                             '<div class="empty-state">No stock changes in the last 30 days.</div>',
@@ -556,11 +675,11 @@ elif st.session_state.stock_page == "category":
                             FROM stock_levels sl
                             JOIN stock_goods sg ON sl.good_id = sg.good_id
                             JOIN stock_categories sc ON sg.category_id = sc.category_id
-                            WHERE sl.good_id = ? AND sl.location = ?
+                            WHERE sl.good_id = %s AND sl.location = %s
                         """, (gid, from_loc)).fetchone()
                         _dst_row = conn.execute(
                             "SELECT bags, quantity_kg FROM stock_levels "
-                            "WHERE good_id=? AND location=?",
+                            "WHERE good_id=%s AND location=%s",
                             (gid, to_loc)).fetchone()
                         cur_bags = int(_src_row["bags"] or 0) if _src_row else 0
                         cur_kg   = float(_src_row["quantity_kg"] or 0) if _src_row else 0.0
@@ -588,18 +707,18 @@ elif st.session_state.stock_page == "category":
                             with conn:
                                 conn.execute(
                                     "UPDATE stock_levels "
-                                    "SET bags=bags-?, quantity_kg=quantity_kg-? "
-                                    "WHERE good_id=? AND location=?",
+                                    "SET bags=bags-%s, quantity_kg=quantity_kg-%s "
+                                    "WHERE good_id=%s AND location=%s",
                                     (bags_mv, kg_mv, gid, from_loc))
                                 conn.execute(
                                     "UPDATE stock_levels "
-                                    "SET bags=bags+?, quantity_kg=quantity_kg+? "
-                                    "WHERE good_id=? AND location=?",
+                                    "SET bags=bags+%s, quantity_kg=quantity_kg+%s "
+                                    "WHERE good_id=%s AND location=%s",
                                     (bags_mv, kg_mv, gid, to_loc))
                                 conn.execute(
                                     "INSERT INTO stock_transfers "
                                     "(transfer_date,good_id,from_location,to_location,"
-                                    "bags_moved,kg_moved,note) VALUES (?,?,?,?,?,?,?)",
+                                    "bags_moved,kg_moved,note) VALUES (%s,%s,%s,%s,%s,%s,%s)",
                                     (str(transfer_date), gid, from_loc, to_loc,
                                      bags_mv, kg_mv, tf_note.strip()))
                                 try:
@@ -720,15 +839,15 @@ elif st.session_state.stock_page == "category":
                                     FROM stock_levels sl
                                     JOIN stock_goods sg ON sl.good_id = sg.good_id
                                     JOIN stock_categories sc ON sg.category_id = sc.category_id
-                                    WHERE sl.good_id = ? AND sl.location = ?
+                                    WHERE sl.good_id = %s AND sl.location = %s
                                 """, (gid, upd_loc)).fetchone()
                                 _b_bags = float(_before_row["bags"] or 0) if _before_row else 0
                                 _b_kg   = float(_before_row["quantity_kg"] or 0) if _before_row else 0.0
                                 _a_bags = float(nb)
                                 _a_kg   = float(nk)
                                 conn.execute(
-                                    "UPDATE stock_levels SET bags=?, quantity_kg=? "
-                                    "WHERE good_id=? AND location=?",
+                                    "UPDATE stock_levels SET bags=%s, quantity_kg=%s "
+                                    "WHERE good_id=%s AND location=%s",
                                     (nb, nk, gid, upd_loc))
                                 if abs(_b_bags - _a_bags) > 0.001 or abs(_b_kg - _a_kg) > 0.001:
                                     try:
@@ -764,7 +883,7 @@ elif st.session_state.stock_page == "category":
                         "UPDATE stock_levels "
                         "SET bags        = CASE WHEN bags        < 0 THEN 0 ELSE bags        END, "
                         "    quantity_kg = CASE WHEN quantity_kg < 0 THEN 0 ELSE quantity_kg END "
-                        "WHERE location = ?",
+                        "WHERE location = %s",
                         (upd_loc,))
                     conn.commit()
                     st.success(f"✓ All negative values at {upd_loc} reset to 0.")
@@ -816,9 +935,9 @@ elif st.session_state.stock_page == "category":
                     else:
                         try:
                             cur = conn.execute(
-                                "INSERT INTO stock_goods (category_id, good_name) VALUES (?,?)",
+                                "INSERT INTO stock_goods (category_id, good_name) VALUES (%s,%s) RETURNING good_id",
                                 (cat_id, gname))
-                            new_gid = cur.lastrowid
+                            new_gid = cur.fetchone()["good_id"]
                             loc_init = {
                                 "Transport": (ag_bags_t, ag_kg_t),
                                 "Shop":      (ag_bags_s, ag_kg_s),
@@ -826,13 +945,14 @@ elif st.session_state.stock_page == "category":
                             }
                             for loc_n, (b, k) in loc_init.items():
                                 conn.execute(
-                                    "INSERT OR IGNORE INTO stock_levels "
-                                    "(good_id, location, bags, quantity_kg) VALUES (?,?,?,?)",
+                                    "INSERT INTO stock_levels "
+                                    "(good_id, location, bags, quantity_kg) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                                     (new_gid, loc_n, b, k))
                             conn.commit()
                             st.success(f"✓ Added '{gname}' to {cat_name}.")
                             st.rerun()
-                        except sqlite3.IntegrityError:
+                        except Exception:
+                            conn.rollback()
                             st.error(f"'{gname}' already exists in {cat_name}.")
 
     finally:

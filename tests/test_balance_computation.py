@@ -72,7 +72,7 @@ def test_clearing_cheque_updates_balance(db):
     """)
     db.commit()
 
-    db.execute("UPDATE passbook_entries SET cheque_status=? WHERE cheque_status=?",
+    db.execute("UPDATE passbook_entries SET cheque_status=%s WHERE cheque_status=%s",
                (CHQ_CLEARED, CHQ_PENDING))
     db.commit()
 
@@ -86,11 +86,11 @@ def test_clearing_cheque_updates_balance(db):
 def test_cih_opening_balance_anchors_balance(db):
     """Opening balance is always the chronological first entry."""
     # Opening balance is seeded by ensure_schema with amount=0; overwrite it
-    db.execute("DELETE FROM cash_in_hand_entries WHERE source_type=?", (SRC_CIH_OPENING,))
+    db.execute("DELETE FROM cash_in_hand_entries WHERE source_type=%s", (SRC_CIH_OPENING,))
     db.execute("""
         INSERT INTO cash_in_hand_entries
           (entry_date, details, amount, txn_type, source_type)
-        VALUES ('2026-01-01', 'Opening Balance', 5000, 'Credit', ?)
+        VALUES ('2026-01-01', 'Opening Balance', 5000, 'Credit', %s)
     """, (SRC_CIH_OPENING,))
     db.execute("""
         INSERT INTO cash_in_hand_entries
@@ -109,11 +109,11 @@ def test_cih_opening_balance_anchors_balance(db):
 
 def test_negative_opening_balance(db):
     """Negative opening_amount stored as Debit, balance starts negative."""
-    db.execute("DELETE FROM cash_in_hand_entries WHERE source_type=?", (SRC_CIH_OPENING,))
+    db.execute("DELETE FROM cash_in_hand_entries WHERE source_type=%s", (SRC_CIH_OPENING,))
     db.execute("""
         INSERT INTO cash_in_hand_entries
           (entry_date, details, amount, txn_type, source_type)
-        VALUES ('2026-01-01', 'Opening Balance', 3000, 'Debit', ?)
+        VALUES ('2026-01-01', 'Opening Balance', 3000, 'Debit', %s)
     """, (SRC_CIH_OPENING,))
     db.commit()
 

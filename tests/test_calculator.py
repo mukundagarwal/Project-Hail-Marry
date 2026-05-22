@@ -8,23 +8,23 @@ from utils.db import INTEREST_RATE_PCT
 def _seed_transaction(db, total=10000, bill_date="2026-01-01",
                        discount_pct=0.0, brokerage=False):
     """Helper: insert a broker + transaction, return transaction_id."""
-    db.execute("INSERT OR IGNORE INTO brokers (broker_name) VALUES ('Test Broker')")
+    db.execute("INSERT INTO brokers (broker_name) VALUES ('Test Broker') ON CONFLICT DO NOTHING")
     bid = db.execute(
         "SELECT broker_id FROM brokers WHERE broker_name='Test Broker'"
     ).fetchone()[0]
-    db.execute("""
+    cur = db.execute("""
         INSERT INTO customer_transactions
           (broker_id, customer_name, date, total_amount, payment_status,
            discount_pct, brokerage_applied)
-        VALUES (?, 'Ramesh', ?, ?, 'Pending', ?, ?)
+        VALUES (%s, 'Ramesh', %s, %s, 'Pending', %s, %s) RETURNING transaction_id
     """, (bid, bill_date, total, discount_pct, 1 if brokerage else 0))
-    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return cur.fetchone()["transaction_id"]
 
 
 def _add_payment(db, tid, amount, payment_date):
     db.execute("""
         INSERT INTO payments (transaction_id, payment_date, amount, method)
-        VALUES (?, ?, ?, 'Cash')
+        VALUES (%s, %s, %s, 'Cash')
     """, (tid, payment_date, amount))
 
 
@@ -42,16 +42,16 @@ def test_grace_period_zero_interest(db):
 
 
 def test_interest_starts_after_grace(db):
-    """Payment on day 40 with grace=35 → 5 days of interest."""
+    """Payment on 30/360 day 39, grace=35 → 4 days of interest (39-35)."""
     tid = _seed_transaction(db, total=36500, bill_date="2026-01-01")
-    _add_payment(db, tid, 36500, "2026-02-10")  # 40 days later
+    _add_payment(db, tid, 36500, "2026-02-10")  # 40 calendar / 39 30-360 days
     db.commit()
 
     res = calculate_final_settlement(
         tid, settlement_date=date(2026, 2, 10), grace_days=35, conn=db)
 
-    # 5 days of interest on 36500 at INTEREST_RATE_PCT
-    expected = round(36500 * (INTEREST_RATE_PCT / 100) * (5 / 365), 2)
+    # 4 30/360-days of interest on 36500 at INTEREST_RATE_PCT
+    expected = round(36500 * (INTEREST_RATE_PCT / 100) * (4 / 360), 2)
     assert abs(res["total_interest"] - expected) < 0.10
 
 
@@ -118,19 +118,23 @@ def test_future_payment_capped_at_settlement_date(db):
     assert pmt["date"] == settle
 
 
-def test_leap_year_interest_factor(db):
-    """Bill straddling a leap year uses 366 for leap portion."""
-    # 2024 is a leap year; bill from 2024-12-01, payment 2025-02-01
-    tid = _seed_transaction(db, total=36500, bill_date="2024-12-01")
-    _add_payment(db, tid, 36500, "2025-02-01")
-    db.commit()
+def test_interest_factor_uses_360_days():
+    """_interest_factor uses 30/360: Jan 1 → Jul 1 = 6 months = 180/360 = 0.5 exactly."""
+    from utils.calculator import _interest_factor
+    start = date(2026, 1, 1)
+    end   = date(2026, 7, 1)   # 6 months × 30 = 180 days in 30/360
+    result = _interest_factor(start, end)
+    assert abs(result - 0.5) < 0.0001
 
-    res_leapaware = calculate_final_settlement(
-        tid, settlement_date=date(2025, 2, 1), grace_days=0, conn=db)
 
-    # Compare with naive 365-only calculation for same period
-    naive_days = (date(2025, 2, 1) - date(2024, 12, 1)).days
-    naive_interest = round(36500 * (INTEREST_RATE_PCT / 100) * (naive_days / 365), 2)
-
-    # Leap-aware result should differ from naive 365-only calculation
-    assert abs(res_leapaware["total_interest"] - naive_interest) > 0.001
+def test_days_30_360():
+    """_days_30_360 matches the 30/360 formula: (Y2-Y1)×360 + (M2-M1)×30 + (D2-D1)."""
+    from utils.calculator import _days_30_360
+    # Conversation example: 07 Aug 2025 → 14 Jan 2026
+    assert _days_30_360(date(2025, 8, 7), date(2026, 1, 14)) == 157
+    # Same month: 1 Jan → 31 Jan = 30 days (not 30 calendar)
+    assert _days_30_360(date(2026, 1, 1), date(2026, 1, 31)) == 30
+    # Exactly one year
+    assert _days_30_360(date(2025, 1, 1), date(2026, 1, 1)) == 360
+    # Start == End
+    assert _days_30_360(date(2026, 1, 1), date(2026, 1, 1)) == 0

@@ -10,7 +10,7 @@ from utils.db import SRC_ALLOCATION, SRC_MANUAL
 
 def _seed(db):
     """Return (broker_id, customer_name) after inserting a broker."""
-    db.execute("INSERT OR IGNORE INTO brokers (broker_name) VALUES ('TestBroker')")
+    db.execute("INSERT INTO brokers (broker_name) VALUES ('TestBroker') ON CONFLICT DO NOTHING")
     bid = db.execute(
         "SELECT broker_id FROM brokers WHERE broker_name='TestBroker'"
     ).fetchone()[0]
@@ -18,21 +18,21 @@ def _seed(db):
 
 
 def _txn(db, bid, cname, total, bill_date="2026-01-01"):
-    db.execute("""
+    cur = db.execute("""
         INSERT INTO customer_transactions
           (broker_id, customer_name, date, total_amount, payment_status, calc_status)
-        VALUES (?, ?, ?, ?, 'Pending', 'Pending')
+        VALUES (%s, %s, %s, %s, 'Pending', 'Pending') RETURNING transaction_id
     """, (bid, cname, bill_date, total))
-    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return cur.fetchone()["transaction_id"]
 
 
 def _pb_entry(db, amount, firm="SP Spices"):
-    db.execute("""
+    cur = db.execute("""
         INSERT INTO passbook_entries
           (firm, entry_date, details, amount, txn_type, source_type)
-        VALUES (?, '2026-02-01', 'Suspense', ?, 'Credit', 'Manual')
+        VALUES (%s, '2026-02-01', 'Suspense', %s, 'Credit', 'Manual') RETURNING entry_id
     """, (firm, amount))
-    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return cur.fetchone()["entry_id"]
 
 
 # ── CRIT-01 regression ─────────────────────────────────────────
@@ -53,9 +53,9 @@ def test_allocate_respects_target_txn_id(db):
 
     # T1 must have a payment; T2 must NOT
     p1 = db.execute(
-        "SELECT * FROM payments WHERE transaction_id=?", (t1,)).fetchone()
+        "SELECT * FROM payments WHERE transaction_id=%s", (t1,)).fetchone()
     p2 = db.execute(
-        "SELECT * FROM payments WHERE transaction_id=?", (t2,)).fetchone()
+        "SELECT * FROM payments WHERE transaction_id=%s", (t2,)).fetchone()
     assert p1 is not None
     assert p2 is None
 
@@ -81,7 +81,7 @@ def test_allocate_invalid_target_returns_error(db):
     t1 = _txn(db, bid, cname, 5000)
     # T2 is eligible; T1 is Calculated (ineligible)
     _txn(db, bid, cname, 8000)
-    db.execute("UPDATE customer_transactions SET calc_status='Calculated' WHERE transaction_id=?", (t1,))
+    db.execute("UPDATE customer_transactions SET calc_status='Calculated' WHERE transaction_id=%s", (t1,))
     eid = _pb_entry(db, 5000)
     db.commit()
 
@@ -97,7 +97,7 @@ def test_allocate_no_eligible_transactions(db):
     bid, cname = _seed(db)
     t1 = _txn(db, bid, cname, 5000)
     t2 = _txn(db, bid, cname, 8000)
-    db.execute("UPDATE customer_transactions SET calc_status='Calculated' WHERE transaction_id IN (?,?)", (t1, t2))
+    db.execute("UPDATE customer_transactions SET calc_status='Calculated' WHERE transaction_id IN (%s,%s)", (t1, t2))
     eid = _pb_entry(db, 5000)
     db.commit()
 
@@ -107,7 +107,7 @@ def test_allocate_no_eligible_transactions(db):
     assert res["success"] is False
 
     # Passbook entry should still be Suspense
-    pb = db.execute("SELECT details FROM passbook_entries WHERE entry_id=?", (eid,)).fetchone()
+    pb = db.execute("SELECT details FROM passbook_entries WHERE entry_id=%s", (eid,)).fetchone()
     assert pb["details"] == "Suspense"
 
 
@@ -123,7 +123,7 @@ def test_allocate_overpayment_stays_partial(db):
 
     assert res["success"] is True
     row = db.execute(
-        "SELECT payment_status FROM customer_transactions WHERE transaction_id=?",
+        "SELECT payment_status FROM customer_transactions WHERE transaction_id=%s",
         (t1,)).fetchone()
     assert row["payment_status"] == "Partial"
 
@@ -144,11 +144,11 @@ def test_unlink_reverts_to_suspense(db):
     assert res["success"] is True
 
     pmt = db.execute(
-        "SELECT * FROM payments WHERE transaction_id=? AND note LIKE ?",
+        "SELECT * FROM payments WHERE transaction_id=%s AND note LIKE %s",
         (t1, f"Auto-allocated from passbook #{eid}%")).fetchone()
     assert pmt is None
 
-    pb = db.execute("SELECT details, source_type FROM passbook_entries WHERE entry_id=?", (eid,)).fetchone()
+    pb = db.execute("SELECT details, source_type FROM passbook_entries WHERE entry_id=%s", (eid,)).fetchone()
     assert pb["details"] == "Suspense"
     assert pb["source_type"] == SRC_MANUAL
 
@@ -165,7 +165,7 @@ def test_unlink_handles_missing_payment_gracefully(db):
 
     # Manually delete the auto-allocated payment
     db.execute(
-        "DELETE FROM payments WHERE transaction_id=? AND note LIKE ?",
+        "DELETE FROM payments WHERE transaction_id=%s AND note LIKE %s",
         (t1, f"Auto-allocated from passbook #{eid}%"))
     db.commit()
 
@@ -174,5 +174,5 @@ def test_unlink_handles_missing_payment_gracefully(db):
 
     assert res["success"] is True
 
-    pb = db.execute("SELECT details FROM passbook_entries WHERE entry_id=?", (eid,)).fetchone()
+    pb = db.execute("SELECT details FROM passbook_entries WHERE entry_id=%s", (eid,)).fetchone()
     assert pb["details"] == "Suspense"

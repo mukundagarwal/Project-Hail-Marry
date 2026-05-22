@@ -20,7 +20,7 @@ def test_hardcoded_goods_come_first(db):
         "SELECT category_id FROM stock_categories WHERE category_name='Arecanut'"
     ).fetchone()[0]
     db.execute(
-        "INSERT OR IGNORE INTO stock_goods (category_id, good_name) VALUES (?,?)",
+        "INSERT INTO stock_goods (category_id, good_name) VALUES (%s,%s) ON CONFLICT DO NOTHING",
         (cat_id, "Z New Good"),
     )
     db.commit()
@@ -37,7 +37,7 @@ def test_db_good_not_in_hardcoded_appended(db):
         "SELECT category_id FROM stock_categories WHERE category_name='Arecanut'"
     ).fetchone()[0]
     db.execute(
-        "INSERT OR IGNORE INTO stock_goods (category_id, good_name) VALUES (?,?)",
+        "INSERT INTO stock_goods (category_id, good_name) VALUES (%s,%s) ON CONFLICT DO NOTHING",
         (cat_id, "Mng. Vichras"),
     )
     db.commit()
@@ -49,13 +49,13 @@ def test_db_good_not_in_hardcoded_appended(db):
 
 def test_extra_category_added(db):
     db.execute(
-        "INSERT OR IGNORE INTO stock_categories (category_name) VALUES ('Cashew')"
+        "INSERT INTO stock_categories (category_name) VALUES ('Cashew') ON CONFLICT DO NOTHING"
     )
     cashew_id = db.execute(
         "SELECT category_id FROM stock_categories WHERE category_name='Cashew'"
     ).fetchone()[0]
     db.execute(
-        "INSERT OR IGNORE INTO stock_goods (category_id, good_name) VALUES (?,?)",
+        "INSERT INTO stock_goods (category_id, good_name) VALUES (%s,%s) ON CONFLICT DO NOTHING",
         (cashew_id, "W180"),
     )
     db.commit()
@@ -73,6 +73,7 @@ def test_no_duplicates_when_good_already_hardcoded(db):
 
 
 def test_empty_flag_when_no_goods(db):
+    db.execute("DELETE FROM stock_levels")
     db.execute("DELETE FROM stock_goods")
     db.commit()
     merged = get_merged_goods(db, [], [])
@@ -80,6 +81,7 @@ def test_empty_flag_when_no_goods(db):
 
 
 def test_not_empty_when_hardcoded_goods_present(db):
+    db.execute("DELETE FROM stock_levels")
     db.execute("DELETE FROM stock_goods")
     db.commit()
     merged = get_merged_goods(db, ARECA_NUT_GOODS, BLACK_PEPPER_GOODS)

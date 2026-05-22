@@ -8,29 +8,30 @@ from datetime import datetime, date, timedelta
 from utils.db import get_conn, INTEREST_RATE_PCT
 
 
-def _is_leap(year: int) -> bool:
-    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+def _days_30_360(start: date, end: date) -> int:
+    """
+    Count days between two dates using the 30/360 day-count convention:
+      - Every month = 30 days
+      - Every year  = 360 days
+
+    Formula: (Y2-Y1)×360 + (M2-M1)×30 + (D2-D1)
+    Returns 0 if end <= start.
+    """
+    if end <= start:
+        return 0
+    return (
+        (end.year  - start.year)  * 360 +
+        (end.month - start.month) * 30  +
+        (end.day   - start.day)
+    )
 
 
 def _interest_factor(start: date, end: date) -> float:
     """
-    Returns the time-fraction for interest accrual between start (exclusive)
-    and end (inclusive). Splits the accrual window by calendar year so a bill
-    that straddles a leap year gets 366 in the denominator for the leap year
-    portion and 365 for non-leap portions.
+    Returns the time fraction for interest accrual
+    using the 30/360 day-count convention.
     """
-    if end <= start:
-        return 0.0
-    total = 0.0
-    cur = start
-    while cur < end:
-        year_end     = date(cur.year, 12, 31)
-        segment_end  = min(end, year_end)
-        days         = (segment_end - cur).days
-        year_days    = 366 if _is_leap(cur.year) else 365
-        total       += days / year_days
-        cur          = segment_end + timedelta(days=1) if segment_end < end else end
-    return total
+    return _days_30_360(start, end) / 360.0
 
 
 def line_total(bags, bag_rate, qty, rate) -> float:
@@ -50,7 +51,7 @@ def calculate_final_settlement(transaction_id: int,
         conn = get_conn()
     try:
         txn = conn.execute(
-            "SELECT * FROM customer_transactions WHERE transaction_id=?",
+            "SELECT * FROM customer_transactions WHERE transaction_id=%s",
             (transaction_id,)
         ).fetchone()
         if txn is None:
@@ -71,7 +72,7 @@ def calculate_final_settlement(transaction_id: int,
         interest_start = start_date + timedelta(days=grace_days)
 
         pmts_rows = conn.execute(
-            "SELECT * FROM payments WHERE transaction_id=? ORDER BY payment_date ASC",
+            "SELECT * FROM payments WHERE transaction_id=%s ORDER BY payment_date ASC",
             (transaction_id,)
         ).fetchall()
 
@@ -80,6 +81,7 @@ def calculate_final_settlement(transaction_id: int,
         total_paid        = 0.0
         total_interest    = 0.0
         payment_details   = []
+        prev_int_days     = 0   # interest days at previous event (0 = interest_start)
 
         for p in pmts:
             try:
@@ -88,9 +90,13 @@ def calculate_final_settlement(transaction_id: int,
                 pdate = start_date
             pdate = min(pdate, settle_date)   # cap future-dated payments
             amt           = float(p["amount"])
-            interest_days = max((pdate - interest_start).days, 0)
-            factor        = _interest_factor(interest_start, pdate)
-            interest      = round(amt * (rate / 100) * factor, 2)
+            # Total 30/360 interest days from interest_start to this payment (for display)
+            interest_days = max(_days_30_360(start_date, pdate) - grace_days, 0)
+            # Incremental days since last payment (or since interest_start)
+            _increment    = max(interest_days - prev_int_days, 0)
+            # Interest on the full outstanding balance for the incremental period only
+            _int_principal = max(0.0, running_principal)
+            interest      = round(_int_principal * (rate / 100) * (_increment / 360.0), 2)
             payment_details.append({
                 "payment_id":        p["payment_id"],
                 "date":              pdate,
@@ -98,11 +104,12 @@ def calculate_final_settlement(transaction_id: int,
                 "method":            p.get("method", "Cash"),
                 "note":              p.get("note", ""),
                 "days":              interest_days,
-                "days_from_start":   max((pdate - start_date).days, 0),
+                "days_from_start":   _days_30_360(start_date, pdate),
                 "within_grace":      pdate < interest_start,
                 "interest":          interest,
                 "running_principal": running_principal,
             })
+            prev_int_days      = interest_days
             running_principal -= amt
             total_paid        += amt
             total_interest    += interest
@@ -110,10 +117,19 @@ def calculate_final_settlement(transaction_id: int,
         _raw_remaining      = total_bill - total_paid
         remaining_principal = _raw_remaining                           # negative = overpayment
         overpayment         = round(max(-_raw_remaining, 0), 2)
-        remaining_days_raw  = max((settle_date - start_date).days, 0)
-        remaining_int_days  = max((settle_date - interest_start).days, 0)
-        _rem_factor        = _interest_factor(interest_start, settle_date)
-        remaining_interest  = round(max(remaining_principal, 0) * (rate / 100) * _rem_factor, 2)
+        remaining_days_raw  = max(_days_30_360(start_date, settle_date), 0)
+        remaining_int_days  = max(_days_30_360(start_date, settle_date) - grace_days, 0)
+        # Remaining interest only covers the period from last payment to settlement
+        _rem_increment      = max(remaining_int_days - prev_int_days, 0)
+        _rem_factor         = _rem_increment / 360.0
+        _threshold          = round(total_bill * 0.075, 2)
+        if max(remaining_principal, 0) < _threshold:
+            remaining_interest = 0.0
+            _interest_waived   = True
+        else:
+            remaining_interest = round(
+                max(remaining_principal, 0) * (rate / 100) * _rem_factor, 2)
+            _interest_waived   = False
         total_interest      = round(total_interest + remaining_interest, 2)
 
         discount_amount  = round(total_bill * disc_pct / 100, 2)
@@ -147,6 +163,8 @@ def calculate_final_settlement(transaction_id: int,
             "discount_amount":     discount_amount,
             "brokerage_amount":    brokerage_amount,
             "final_balance_due":   final_balance,
+            "interest_waived":     _interest_waived,
+            "interest_threshold":  _threshold,
         }
     finally:
         if _own_conn:

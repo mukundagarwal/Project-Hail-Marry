@@ -1,16 +1,34 @@
+# Database
+spices.db
+*.db
+
+# Environment variables
+.env
+.env.local
+
 # Python
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
 
-# Database (live data — keep out of source control)
-spices.db
-spices.db-shm
-spices.db-wal
+# Streamlit
+.streamlit/
+*.streamlit.app
 
-# Claude Code
-.claude.json
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Neon connection strings (if stored locally)
+neon_connection.txt

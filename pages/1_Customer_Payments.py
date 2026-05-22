@@ -4,7 +4,7 @@ Internal sub-page routing: st.session_state.page in ("customer", "ledger")
 """
 
 import streamlit as st
-import sqlite3
+import psycopg2.errors
 import pandas as pd
 from datetime import datetime, date
 from decimal import InvalidOperation
@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 import time
 
 from utils.db import (
-    get_conn, ensure_schema, log_audit, deduct_stock_for_sale,
+    get_conn, get_shared_conn, ensure_schema, log_audit, deduct_stock_for_sale,
     get_merged_goods,
     INTEREST_RATE_PCT, DEFAULT_GRACE_DAYS, TXNS_PER_PAGE,
     GOODS_OPTIONS, ARECA_NUT_GOODS, BLACK_PEPPER_GOODS,
@@ -24,7 +24,7 @@ from utils.db import (
     CHQ_PENDING, CHQ_CLEARED,
 )
 from utils.formatters import fmt_date, fmt_inr, parse_slash_amount, days_between, h
-from utils.calculator import calculate_final_settlement, line_total
+from utils.calculator import calculate_final_settlement, line_total, _days_30_360
 from utils.styles import APP_CSS, BRAND_BAR_HTML
 
 # ── Page config ────────────────────────────────────────────────
@@ -43,7 +43,7 @@ st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
 # ── Session state defaults ─────────────────────────────────────
 for _k, _v in {
     "page": "customer", "selected_txns": [], "sum_intercept": [],
-    "show_sum_report": False, "filter_mode": "All",
+    "show_sum_report": False, "filter_mode": "Payment Due",
     "filter_single": date.today(), "filter_start": date.today(),
     "filter_end": date.today(), "bill_items": [], "bill_adding_more": False,
     "bill_customer": "", "bill_date": date.today(),
@@ -117,6 +117,11 @@ def render_settlement_preview(res: dict) -> str:
     rem_html = ""
     if res["remaining_principal"] > 0:
         rem_d = res.get("remaining_int_days", res.get("remaining_days", 0))
+        _waived = res.get("interest_waived", False)
+        _waived_note = (
+            f'<div style="font-size:.72rem;color:#b89040;margin-top:3px">'
+            f'⚠ waived — outstanding &lt; 7.5% of bill</div>'
+        ) if _waived else ""
         rem_html = (f'<div class="tl-node"><div class="tl-dot remaining"></div>'
                     f'<div class="tl-remaining"><div class="tl-remaining-label">'
                     f'📌 Remaining Balance (as of {fmt_date(res["settlement_date"])})</div>'
@@ -126,9 +131,9 @@ def render_settlement_preview(res: dict) -> str:
                     f'<div><div class="tl-label">Interest Days (from {istart_str})</div>'
                     f'<div class="tl-days">{rem_d} days</div></div>'
                     f'<div><div class="tl-label">Interest on Remainder</div>'
-                    f'<div class="tl-interest">+ {fmt_inr(res["remaining_interest"])}</div></div>'
+                    f'<div class="tl-interest">+ {fmt_inr(res["remaining_interest"])}{_waived_note}</div></div>'
                     f'</div></div></div>')
-    formula = (f"I = P × ({res['rate']}% ÷ 100) × (Days ÷ 365) "
+    formula = (f"I = P × ({res['rate']}% ÷ 100) × (Days ÷ 360) "
                f"| Grace: {grace} days → interest starts {istart_str}")
     _fbd = res["final_balance_due"]
     if _fbd < -0.01:
@@ -172,12 +177,21 @@ if st.session_state.page == "customer":
     st.markdown('<div class="page-title">Customer Payments</div>', unsafe_allow_html=True)
     st.markdown('<div class="page-sub">Broker directory</div>', unsafe_allow_html=True)
 
-    conn = get_conn()
+    conn = get_shared_conn()
     try:
         n_b  = int(pd.read_sql("SELECT COUNT(*) c FROM brokers", conn).fillna(0).iloc[0]["c"])
         n_t  = int(pd.read_sql("SELECT COUNT(*) c FROM customer_transactions", conn).fillna(0).iloc[0]["c"])
         rev  = float(pd.read_sql("SELECT COALESCE(SUM(total_amount),0) s FROM customer_transactions", conn).fillna(0).iloc[0]["s"])
-        pend = float(pd.read_sql("SELECT COALESCE(SUM(total_amount),0) s FROM customer_transactions WHERE payment_status='Pending'", conn).fillna(0).iloc[0]["s"])
+        pend = float(pd.read_sql("""
+            SELECT COALESCE(SUM(ct.total_amount - COALESCE(p.paid, 0)), 0) s
+            FROM customer_transactions ct
+            LEFT JOIN (
+                SELECT transaction_id, SUM(amount) AS paid
+                FROM payments
+                GROUP BY transaction_id
+            ) p ON ct.transaction_id = p.transaction_id
+            WHERE ct.payment_status IN ('Pending', 'Partial')
+        """, conn).fillna(0).iloc[0]["s"])
         st.markdown(f'<div class="stat-row">'
                     f'<div class="stat-pill"><span class="sp-label">Brokers</span>'
                     f'<span class="sp-value">{int(n_b)}</span><span class="sp-sub">in directory</span></div>'
@@ -200,15 +214,14 @@ if st.session_state.page == "customer":
                     if not name_clean:
                         st.error("Name cannot be empty.")
                     else:
-                        max_row = conn.execute("SELECT COALESCE(MAX(broker_id),100) FROM brokers").fetchone()
-                        next_id = int(max_row[0]) + 1
                         try:
-                            conn.execute("INSERT INTO brokers (broker_id,broker_name) VALUES (?,?)",
-                                         (next_id, name_clean))
+                            conn.execute("INSERT INTO brokers (broker_name) VALUES (%s)",
+                                         (name_clean,))
                             conn.commit()
                             st.success(f"Added '{name_clean}'")
                             st.rerun()
-                        except sqlite3.IntegrityError:
+                        except Exception:
+                            conn.rollback()
                             st.error("A broker with this name already exists.")
 
         st.markdown("<hr>", unsafe_allow_html=True)
@@ -220,7 +233,7 @@ if st.session_state.page == "customer":
         df_ov = pd.read_sql(
             "SELECT broker_id, COUNT(*) as overdue_count FROM customer_transactions "
             "WHERE payment_status IN ('Pending','Partial') "
-            "AND julianday(?) - julianday(date) > 60 GROUP BY broker_id",
+            "AND julianday(%s) - julianday(date) > 60 GROUP BY broker_id",
             conn, params=(_today_str,))
         overdue_map = dict(zip(df_ov["broker_id"], df_ov["overdue_count"]))
 
@@ -242,15 +255,16 @@ if st.session_state.page == "customer":
                                     "broker_id": row["broker_id"], "broker_name": row["broker_name"],
                                     "page": "ledger", "selected_txns": [], "show_sum_report": False,
                                     "bill_items": [], "bill_adding_more": False,
-                                    "ledger_page": 0,
+                                    "ledger_page": 0, "filter_mode": "Payment Due",
                                 }); st.rerun()
                         with c2c:
                             if st.button("🗑", key=f"del_{row['broker_id']}"):
                                 try:
-                                    conn.execute("DELETE FROM brokers WHERE broker_id=?",
+                                    conn.execute("DELETE FROM brokers WHERE broker_id=%s",
                                                  (row["broker_id"],))
                                     conn.commit(); st.rerun()
-                                except sqlite3.IntegrityError:
+                                except Exception:
+                                    conn.rollback()
                                     st.error(f"Cannot delete '{row['broker_name']}' — "
                                              "existing transactions reference this broker.")
     finally:
@@ -288,7 +302,7 @@ elif st.session_state.page == "ledger":
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-    conn = get_conn()
+    conn = get_shared_conn()
     try:
         _today_iso = date.today().isoformat()
 
@@ -300,9 +314,9 @@ elif st.session_state.page == "ledger":
                 COALESCE(SUM(CASE WHEN final_settlement IS NOT NULL THEN final_settlement ELSE 0 END),0) settled,
                 COALESCE(SUM(CASE WHEN calc_status='Pending' THEN 1 ELSE 0 END),0) uncalc,
                 COALESCE(SUM(CASE WHEN payment_status IN ('Pending','Partial')
-                    AND julianday(?) - julianday(date) > 60
+                    AND julianday(%s) - julianday(date) > 60
                     THEN 1 ELSE 0 END),0) overdue_cnt
-            FROM customer_transactions WHERE broker_id=?""",
+            FROM customer_transactions WHERE broker_id=%s""",
             conn, params=(_today_iso, bid)).iloc[0]
 
         st.markdown(f"""
@@ -360,8 +374,16 @@ elif st.session_state.page == "ledger":
         act1, act2, _ = st.columns([1.2, 1.2, 4], gap="small")
         with act1:
             with st.popover("📋  Log New Bill", use_container_width=True):
+                # Deferred full-form reset — MUST be first, before any widget renders
+                if st.session_state.pop("_reset_item_form", False):
+                    st.session_state["inp_cust"] = ""
+                    for _k in ["ibags", "iqty", "irate", "ibr", "ifreight"]:
+                        st.session_state[_k] = ""
+
                 st.markdown("##### New Transaction")
-                new_cust = st.text_input("Customer Name", value=st.session_state.bill_customer)
+                new_cust = st.text_input("Customer Name",
+                                         value=st.session_state.bill_customer,
+                                         key="inp_cust")
                 new_date = st.date_input("Bill Date", value=st.session_state.bill_date)
                 new_pst  = st.selectbox("Payment Status", ["Pending", "Paid", "Partial"],
                                         index=["Pending","Paid","Partial"].index(st.session_state.bill_pstatus))
@@ -499,9 +521,7 @@ elif st.session_state.page == "ledger":
                                     "line_total": ilt,
                                 })
                                 st.session_state.bill_adding_more = add_more
-                                # Clear form for next entry
-                                for _k in ["ibags", "iqty", "irate", "ibr", "ifreight"]:
-                                    st.session_state.pop(_k, None)
+                                st.session_state["_reset_item_form"] = True
                                 st.rerun()
                     except (ValueError, InvalidOperation) as e:
                         st.error(f"Invalid number: {e}")
@@ -560,19 +580,20 @@ elif st.session_state.page == "ledger":
                                              total_amount,payment_status,payment_method,
                                              cheque_number,cheque_date,deposit_firm,bill_sent,
                                              interest_rate_pct,calc_status,brokerage_paid)
-                                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'Pending','Unpaid')""",
+                                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Pending','Unpaid')
+                                            RETURNING transaction_id""",
                                             (bid, cust, str(st.session_state.bill_date), goods_label,
                                              total_bags, total_qty, 0, grand,
                                              st.session_state.bill_pstatus, None,
                                              None, None, None,
                                              _bill_sent_save, 0.0))
-                                        txn_id = cur.lastrowid
+                                        txn_id = cur.fetchone()["transaction_id"]
                                         for it in st.session_state.bill_items:
                                             cur.execute(
                                                 """INSERT INTO transaction_items
                                                 (transaction_id,type_of_goods,bags,bag_rate,
                                                  quantity,rate,freight,collection_point,line_total)
-                                                VALUES (?,?,?,?,?,?,?,?,?)""",
+                                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                                                 (txn_id, it["goods"], it["bags"], it["bag_rate"],
                                                  it["qty"], it["rate"],
                                                  it.get("freight", 0), it.get("collection_point", ""),
@@ -592,9 +613,9 @@ elif st.session_state.page == "ledger":
                                         st.session_state.bill_customer    = ""
                                         st.session_state.bill_date        = date.today()
                                         st.session_state.bill_pstatus     = "Pending"
-                                        for _k in ["ibags", "iqty", "irate", "ibr", "ifreight",
-                                                   "bill_ig_sel", "_prev_bill_ig",
-                                                   "_restore_bag_rate", "icollect",
+                                        st.session_state["_reset_item_form"] = True
+                                        for _k in ["bill_ig_sel", "_prev_bill_ig",
+                                                   "_restore_bag_rate",
                                                    "inp_cust", "inp_date", "inp_pst"]:
                                             st.session_state.pop(_k, None)
                                         for _sw in stock_warns:
@@ -607,9 +628,9 @@ elif st.session_state.page == "ledger":
                             st.session_state.bill_customer    = ""
                             st.session_state.bill_date        = date.today()
                             st.session_state.bill_pstatus     = "Pending"
-                            for _k in ["ibags", "iqty", "irate", "ibr", "ifreight",
-                                       "bill_ig_sel", "_prev_bill_ig",
-                                       "_restore_bag_rate", "icollect",
+                            st.session_state["_reset_item_form"] = True
+                            for _k in ["bill_ig_sel", "_prev_bill_ig",
+                                       "_restore_bag_rate",
                                        "inp_cust", "inp_date", "inp_pst"]:
                                 st.session_state.pop(_k, None)
                             st.rerun()
@@ -620,7 +641,7 @@ elif st.session_state.page == "ledger":
             sum_label = f"Σ  Sum  ({n_sel})" if n_sel > 0 else "Σ  Sum Selected"
             if st.button(sum_label, use_container_width=True, disabled=(n_sel == 0)):
                 _sel_ids = [int(i) for i in st.session_state.selected_txns]
-                _ph      = ",".join(["?"] * len(_sel_ids))
+                _ph      = ",".join(["%s"] * len(_sel_ids))
                 pid = pd.read_sql(
                     f"SELECT transaction_id FROM customer_transactions "
                     f"WHERE transaction_id IN ({_ph}) AND calc_status='Pending'",
@@ -643,7 +664,7 @@ elif st.session_state.page == "ledger":
         # ── BATCH SUM REPORT ────────────────────────────────────
         if st.session_state.show_sum_report and st.session_state.selected_txns:
             _sel_ids = [int(i) for i in st.session_state.selected_txns]
-            _ph      = ",".join(["?"] * len(_sel_ids))
+            _ph      = ",".join(["%s"] * len(_sel_ids))
             df_s = pd.read_sql(
                 f"SELECT * FROM customer_transactions WHERE transaction_id IN ({_ph})",
                 conn, params=tuple(_sel_ids))
@@ -652,15 +673,17 @@ elif st.session_state.page == "ledger":
             g_disc  = float(df_s["discount_amount"].fillna(0).sum())
             g_brok  = float(df_s["brokerage_amount"].fillna(0).sum())
             g_final = float(df_s["final_settlement"].fillna(0).sum())
+            g_rcvd  = float(df_s["payment_received"].fillna(0).sum())
 
             st.markdown(f'<div class="sum-panel">'
                         f'<div class="sum-panel-title">📊 Batch Settlement Summary — {len(df_s)} transactions</div>'
                         f'<div class="sum-grid">'
                         f'<div class="sum-cell"><div class="sc-l">Gross Amount</div><div class="sc-v">{fmt_inr(g_tot)}</div></div>'
+                        f'<div class="sum-cell"><div class="sc-l">Amount Received</div><div class="sc-v" style="color:#8dd87a">{fmt_inr(g_rcvd)}</div></div>'
                         f'<div class="sum-cell"><div class="sc-l">Total Discount</div><div class="sc-v" style="color:#d4864a">{fmt_inr(g_disc)}</div></div>'
                         f'<div class="sum-cell"><div class="sc-l">Total Brokerage</div><div class="sc-v" style="color:#d4864a">{fmt_inr(g_brok)}</div></div>'
                         f'<div class="sum-cell"><div class="sc-l">Total Interest</div><div class="sc-v" style="color:#6a9fd4">{fmt_inr(g_int)}</div></div>'
-                        f'<div class="sum-cell"><div class="sc-l">Net Settlement</div>'
+                        f'<div class="sum-cell"><div class="sc-l">Total Amount Due</div>'
                         f'<div class="sc-v" style="color:#8dd87a;font-size:1.4rem">{fmt_inr(g_final)}</div></div>'
                         f'</div></div>', unsafe_allow_html=True)
 
@@ -692,18 +715,8 @@ elif st.session_state.page == "ledger":
                 f'<th style="text-align:left;padding:6px">Customer</th><th style="padding:6px">Date</th>'
                 f'<th style="padding:6px">Goods</th><th style="text-align:right;padding:6px">Amount</th>'
                 f'<th style="text-align:right;padding:6px">Discount</th><th style="text-align:right;padding:6px">Brokerage</th>'
-                f'<th style="text-align:right;padding:6px">Interest</th><th style="text-align:right;padding:6px">Settlement</th>'
+                f'<th style="text-align:right;padding:6px">Interest</th><th style="text-align:right;padding:6px">Total Amount Due</th>'
                 f'</tr></thead><tbody>{rows_screen}</tbody></table>', unsafe_allow_html=True)
-
-            rows_print = "".join(
-                f'<tr><td>{h(r["customer_name"])}</td><td>{fmt_date(r["date"])}</td>'
-                f'<td>{h(r["type_of_goods"])}</td>'
-                f'<td class="r">{fmt_inr(r["total_amount"])}</td>'
-                f'<td class="r disc">{fmt_inr(r["discount_amount"] or 0)}</td>'
-                f'<td class="r disc">{fmt_inr(r["brokerage_amount"] or 0)}</td>'
-                f'<td class="r int">{fmt_inr(r["interest_amount"] or 0)}</td>'
-                f'<td class="r bold">{fmt_inr(r["final_settlement"] or 0)}</td></tr>'
-                for _, r in df_s.iterrows())
 
             _ids_in     = ",".join(str(int(i)) for i in df_s["transaction_id"])
             _df_all_pmts = pd.read_sql(
@@ -746,7 +759,7 @@ body{{font-family:'Segoe UI',Arial,sans-serif;font-size:13px;color:#111;padding:
 .header{{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;border-bottom:2px solid #333;padding-bottom:12px}}
 .header h1{{font-size:20px;color:#1a3a1a}}
 .meta{{font-size:11px;color:#666;text-align:right;line-height:1.8}}
-.summary{{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;background:#f5f5f5;border:1px solid #ddd;border-radius:6px;padding:14px;margin-bottom:20px}}
+.summary{{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;background:#f5f5f5;border:1px solid #ddd;border-radius:6px;padding:14px;margin-bottom:20px}}
 .s-cell .s-label{{font-size:9px;text-transform:uppercase;color:#888;letter-spacing:.06em}}
 .s-cell .s-val{{font-size:15px;font-weight:700;margin-top:3px}}
 .s-cell .s-val.green{{color:#1a6a1a}}
@@ -769,24 +782,16 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
 </div>
 <div class="summary">
   <div class="s-cell"><div class="s-label">Gross Amount</div><div class="s-val">{fmt_inr(g_tot)}</div></div>
+  <div class="s-cell"><div class="s-label">Amount Received</div><div class="s-val" style="color:#1a6a1a">{fmt_inr(g_rcvd)}</div></div>
   <div class="s-cell"><div class="s-label">Discount</div><div class="s-val" style="color:#c05000">{fmt_inr(g_disc)}</div></div>
   <div class="s-cell"><div class="s-label">Brokerage</div><div class="s-val" style="color:#c05000">{fmt_inr(g_brok)}</div></div>
   <div class="s-cell"><div class="s-label">Interest</div><div class="s-val" style="color:#2050a0">{fmt_inr(g_int)}</div></div>
-  <div class="s-cell"><div class="s-label">Net Settlement</div><div class="s-val green">{fmt_inr(g_final)}</div></div>
+  <div class="s-cell"><div class="s-label">Total Amount Due</div><div class="s-val green">{fmt_inr(g_final)}</div></div>
 </div>
-<h3>Summary Table</h3>
-<table><thead><tr><th>Customer</th><th>Bill Date</th><th>Goods</th>
-<th class="r">Amount</th><th class="r">Discount</th><th class="r">Brokerage</th>
-<th class="r">Interest</th><th class="r">Settlement</th></tr></thead>
-<tbody>{rows_print}</tbody>
-<tfoot><tr><td colspan="3">TOTAL — {len(df_s)} transactions</td>
-<td class="r">{fmt_inr(g_tot)}</td><td class="r disc">{fmt_inr(g_disc)}</td>
-<td class="r disc">{fmt_inr(g_brok)}</td><td class="r int">{fmt_inr(g_int)}</td>
-<td class="r bold">{fmt_inr(g_final)}</td></tr></tfoot></table>
 <h3>Transaction Detail</h3>
 <table><thead><tr><th>Customer</th><th>Date</th><th>Goods</th>
 <th class="r">Amount</th><th class="r">Discount</th><th class="r">Brokerage</th>
-<th class="r">Interest</th><th class="r">Settlement</th></tr></thead>
+<th class="r">Interest</th><th class="r">Total Amount Due</th></tr></thead>
 <tbody>{per_txn_detail}</tbody></table>
 <div class="footer"><span>S P Spices Business Management Diary</span><span>Printed: {fmt_date(date.today())}</span></div>
 </body></html>"""
@@ -813,7 +818,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
 
         # ── FETCH + FILTER TRANSACTIONS ──────────────────────────
         df_t = pd.read_sql(
-            "SELECT * FROM customer_transactions WHERE broker_id=? ORDER BY date DESC",
+            "SELECT * FROM customer_transactions WHERE broker_id=%s ORDER BY date ASC",
             conn, params=(bid,))
         if fmode == "Single Date":
             df_t = df_t[df_t["date"] == str(st.session_state.filter_single)]
@@ -989,11 +994,11 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                 f' Bill unpaid for over 2 months.</span></div>',
                                 unsafe_allow_html=True)
 
-                _exp_label = "🔴  View / Edit" if is_overdue else "▸  View / Edit"
+                _exp_label = "▸  View / Edit"
                 with st.expander(_exp_label, expanded=False):
 
                     df_items = pd.read_sql(
-                        "SELECT * FROM transaction_items WHERE transaction_id=? ORDER BY item_id",
+                        "SELECT * FROM transaction_items WHERE transaction_id=%s ORDER BY item_id",
                         conn, params=(tid,))
                     if not df_items.empty:
                         rows_i = ""
@@ -1059,7 +1064,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                     st.markdown("##### 📅 Payment Timeline")
 
                     df_pmts = pd.read_sql(
-                        "SELECT * FROM payments WHERE transaction_id=? ORDER BY payment_date ASC",
+                        "SELECT * FROM payments WHERE transaction_id=%s ORDER BY payment_date ASC",
                         conn, params=(tid,))
                     total_paid_so_far = float(df_pmts["amount"].sum()) if not df_pmts.empty else 0.0
 
@@ -1072,7 +1077,8 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                         for _, p in df_pmts.iterrows():
                             pid_p   = int(p["payment_id"])
                             p_amt_v = float(p["amount"])
-                            d_from  = days_between(txn["date"],
+                            _bill_dt_tl = datetime.strptime(str(txn["date"]), "%Y-%m-%d").date()
+                            d_from  = _days_30_360(_bill_dt_tl,
                                                    datetime.strptime(str(p["payment_date"]),"%Y-%m-%d").date())
                             edit_pmt_key = f"edit_pmt_{tid}_{pid_p}"
                             if edit_pmt_key not in st.session_state:
@@ -1134,34 +1140,34 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                         if p["method"] == "Cheque":
                                             conn.execute(
                                                 "DELETE FROM passbook_entries "
-                                                "WHERE source_type=? AND source_id=?",
+                                                "WHERE source_type=%s AND source_id=%s",
                                                 (SRC_CUST_CHQ_PMT, pid_p))
                                         # ── Passbook sync: revert auto-allocated passbook entry ──
                                         if _is_auto_alloc and _auto_alloc_eid:
                                             conn.execute(
                                                 "UPDATE passbook_entries SET details='Suspense',"
-                                                "source_type=?,source_id=NULL "
-                                                "WHERE entry_id=? AND source_type=?",
+                                                "source_type=%s,source_id=NULL "
+                                                "WHERE entry_id=%s AND source_type=%s",
                                                 (SRC_MANUAL, _auto_alloc_eid, SRC_ALLOCATION))
                                         # ── CASH IN HAND SYNC ──────────────────────────────
                                         if p["method"] == "Cash":
                                             try:
                                                 conn.execute(
                                                     "DELETE FROM cash_in_hand_entries "
-                                                    "WHERE source_type=? AND source_id=?",
+                                                    "WHERE source_type=%s AND source_id=%s",
                                                     (SRC_CUSTOMER_CASH, pid_p))
-                                            except sqlite3.IntegrityError:
-                                                pass
-                                        conn.execute("DELETE FROM payments WHERE payment_id=?", (pid_p,))
+                                            except Exception:
+                                                conn.rollback()
+                                        conn.execute("DELETE FROM payments WHERE payment_id=%s", (pid_p,))
                                         rem_q = pd.read_sql(
-                                            "SELECT COALESCE(SUM(amount),0) s FROM payments WHERE transaction_id=?",
+                                            "SELECT COALESCE(SUM(amount),0) s FROM payments WHERE transaction_id=%s",
                                             conn, params=(tid,)).iloc[0]["s"]
                                         new_total = float(rem_q)
-                                        new_st = ("Paid" if new_total >= A else "Partial" if new_total > 0 else "Pending")
+                                        new_st = ("Partial" if new_total > 0 else "Pending")
                                         conn.execute(
-                                            "UPDATE customer_transactions SET payment_status=?,"
+                                            "UPDATE customer_transactions SET payment_status=%s,"
                                             "calc_status='Pending',final_settlement=NULL,interest_amount=0 "
-                                            "WHERE transaction_id=?", (new_st, tid))
+                                            "WHERE transaction_id=%s", (new_st, tid))
                                     st.rerun()
 
                             if st.session_state[edit_pmt_key]:
@@ -1213,43 +1219,44 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                 elif ep_method == "Cheque" and not (ep_chq_no and ep_chq_no.strip()):
                                                     st.error("Cheque Number is required for Cheque payment.")
                                                 else:
-                                                    ep_days       = days_between(txn["date"], ep_date)
+                                                    _bill_dt_ep   = datetime.strptime(str(txn["date"]), "%Y-%m-%d").date()
+                                                    ep_days       = _days_30_360(_bill_dt_ep, ep_date)
                                                     ep_chq_no_sv  = ep_chq_no.strip() if ep_chq_no else None
                                                     ep_chq_dt_sv  = str(ep_chq_date) if ep_chq_date else None
                                                     with conn:
                                                         conn.execute(
-                                                            "UPDATE payments SET payment_date=?,amount=?,method=?,"
-                                                            "note=?,days_from_start=?,cheque_number=?,cheque_date=?,"
-                                                            "deposit_firm=? "
-                                                            "WHERE payment_id=?",
+                                                            "UPDATE payments SET payment_date=%s,amount=%s,method=%s,"
+                                                            "note=%s,days_from_start=%s,cheque_number=%s,cheque_date=%s,"
+                                                            "deposit_firm=%s "
+                                                            "WHERE payment_id=%s",
                                                             (str(ep_date), ep_amt, ep_method,
                                                              ep_note.strip(), ep_days,
                                                              ep_chq_no_sv, ep_chq_dt_sv,
                                                              ep_dep_firm, pid_p))
                                                         new_tot_q = pd.read_sql(
-                                                            "SELECT COALESCE(SUM(amount),0) s FROM payments WHERE transaction_id=?",
+                                                            "SELECT COALESCE(SUM(amount),0) s FROM payments WHERE transaction_id=%s",
                                                             conn, params=(tid,)).iloc[0]["s"]
                                                         new_tot_f = float(new_tot_q)
-                                                        new_st = ("Paid" if new_tot_f >= A else "Partial" if new_tot_f > 0 else "Pending")
+                                                        new_st = ("Partial" if new_tot_f > 0 else "Pending")
                                                         conn.execute(
-                                                            "UPDATE customer_transactions SET payment_status=?,"
+                                                            "UPDATE customer_transactions SET payment_status=%s,"
                                                             "calc_status='Pending',final_settlement=NULL,interest_amount=0 "
-                                                            "WHERE transaction_id=?", (new_st, tid))
+                                                            "WHERE transaction_id=%s", (new_st, tid))
                                                         # ── Passbook sync: cheque method change ──
                                                         _old_m = str(p["method"] or "")
                                                         _brow3 = conn.execute(
                                                             "SELECT b.broker_name FROM brokers b "
                                                             "JOIN customer_transactions ct "
                                                             "ON b.broker_id=ct.broker_id "
-                                                            "WHERE ct.transaction_id=?", (tid,)).fetchone()
+                                                            "WHERE ct.transaction_id=%s", (tid,)).fetchone()
                                                         _bn3   = _brow3[0] if _brow3 else ""
                                                         _det3  = f"{txn['customer_name']} (via {_bn3})"
                                                         if _old_m == "Cheque" and ep_method == "Cheque":
                                                             conn.execute(
                                                                 "UPDATE passbook_entries "
-                                                                "SET firm=?,entry_date=?,details=?,"
-                                                                "amount=?,cheque_number=? "
-                                                                "WHERE source_type=? AND source_id=?",
+                                                                "SET firm=%s,entry_date=%s,details=%s,"
+                                                                "amount=%s,cheque_number=%s "
+                                                                "WHERE source_type=%s AND source_id=%s",
                                                                 (ep_dep_firm,
                                                                  ep_chq_dt_sv or str(ep_date),
                                                                  _det3, round(ep_amt, 2),
@@ -1258,7 +1265,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                         elif _old_m == "Cheque" and ep_method != "Cheque":
                                                             conn.execute(
                                                                 "DELETE FROM passbook_entries "
-                                                                "WHERE source_type=? AND source_id=?",
+                                                                "WHERE source_type=%s AND source_id=%s",
                                                                 (SRC_CUST_CHQ_PMT, pid_p))
                                                         elif _old_m != "Cheque" and ep_method == "Cheque":
                                                             if ep_chq_no_sv and ep_dep_firm:
@@ -1267,7 +1274,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                                     "(firm,entry_date,details,amount,txn_type,"
                                                                     " cheque_number,cheque_status,"
                                                                     " source_type,source_id) "
-                                                                    "VALUES (?,?,?,?,'Credit',?,?,?,?)",
+                                                                    "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s,%s)",
                                                                     (ep_dep_firm,
                                                                      ep_chq_dt_sv or str(ep_date),
                                                                      _det3, round(ep_amt, 2),
@@ -1278,35 +1285,35 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                         if _is_auto_alloc and _auto_alloc_eid:
                                                             conn.execute(
                                                                 "UPDATE passbook_entries "
-                                                                "SET amount=?,entry_date=? "
-                                                                "WHERE entry_id=? "
-                                                                "AND source_type=?",
+                                                                "SET amount=%s,entry_date=%s "
+                                                                "WHERE entry_id=%s "
+                                                                "AND source_type=%s",
                                                                 (round(ep_amt, 2), str(ep_date),
                                                                  _auto_alloc_eid, SRC_ALLOCATION))
                                                         # ── CASH IN HAND SYNC ──────────────────────────────
                                                         if _old_m == "Cash" and ep_method == "Cash":
                                                             conn.execute(
                                                                 "UPDATE cash_in_hand_entries "
-                                                                "SET entry_date=?,amount=? "
-                                                                "WHERE source_type=? AND source_id=?",
+                                                                "SET entry_date=%s,amount=%s "
+                                                                "WHERE source_type=%s AND source_id=%s",
                                                                 (str(ep_date), round(ep_amt, 2),
                                                                  SRC_CUSTOMER_CASH, pid_p))
                                                         elif _old_m == "Cash" and ep_method != "Cash":
                                                             try:
                                                                 conn.execute(
                                                                     "DELETE FROM cash_in_hand_entries "
-                                                                    "WHERE source_type=? AND source_id=?",
+                                                                    "WHERE source_type=%s AND source_id=%s",
                                                                     (SRC_CUSTOMER_CASH, pid_p))
-                                                            except sqlite3.IntegrityError:
-                                                                pass
+                                                            except Exception:
+                                                                conn.rollback()
                                                         elif _old_m != "Cash" and ep_method == "Cash":
                                                             conn.execute(
                                                                 "INSERT INTO cash_in_hand_entries "
                                                                 "(entry_date,details,amount,txn_type,"
                                                                 " source_type,source_id) "
-                                                                "VALUES (?,?,?,?,?,?)",
+                                                                "VALUES (%s,%s,%s,%s,%s,%s)",
                                                                 (str(ep_date),
-                                                                 f"{txn['customer_name']} (via {bname})",
+                                                                 f"Cash from {bname} (Txn: {fmt_date(str(txn['date']))})",
                                                                  round(ep_amt, 2), 'Credit',
                                                                  SRC_CUSTOMER_CASH, pid_p))
                                                     st.session_state[edit_pmt_key] = False
@@ -1369,28 +1376,27 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                         elif p_method == "Cheque" and not (p_chq_no and p_chq_no.strip()):
                                             st.error("Cheque Number is required for Cheque payment.")
                                         else:
-                                            d_fs          = days_between(txn["date"], p_date)
+                                            _bill_dt_lp   = datetime.strptime(str(txn["date"]), "%Y-%m-%d").date()
+                                            d_fs          = _days_30_360(_bill_dt_lp, p_date)
                                             chq_no_save   = p_chq_no.strip() if p_chq_no else None
                                             chq_date_save = str(p_chq_date) if p_chq_date else None
                                             with conn:
-                                                conn.execute(
+                                                _pmt_cur = conn.execute(
                                                     "INSERT INTO payments "
                                                     "(transaction_id,payment_date,amount,method,note,"
                                                     "days_from_start,cheque_number,cheque_date,deposit_firm) "
-                                                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                                                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING payment_id",
                                                     (tid, str(p_date), p_amt, p_method,
                                                      p_note.strip(), d_fs, chq_no_save,
                                                      chq_date_save, p_dep_firm))
+                                                new_pmt_id = _pmt_cur.fetchone()["payment_id"]
                                                 new_total_paid = total_paid_so_far + p_amt
-                                                new_status = ("Paid" if new_total_paid >= A
-                                                              else "Partial" if new_total_paid > 0 else "Pending")
+                                                new_status = ("Partial" if new_total_paid > 0 else "Pending")
                                                 conn.execute(
-                                                    "UPDATE customer_transactions SET payment_status=?,"
+                                                    "UPDATE customer_transactions SET payment_status=%s,"
                                                     "calc_status='Pending',final_settlement=NULL,interest_amount=0 "
-                                                    "WHERE transaction_id=?",
+                                                    "WHERE transaction_id=%s",
                                                     (new_status, tid))
-                                                new_pmt_id = conn.execute(
-                                                    "SELECT last_insert_rowid()").fetchone()[0]
                                                 log_audit(conn, "payments", new_pmt_id, "INSERT",
                                                           new_value={"amount": p_amt,
                                                                      "date": str(p_date),
@@ -1401,14 +1407,14 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                         "SELECT b.broker_name FROM brokers b "
                                                         "JOIN customer_transactions ct "
                                                         "ON b.broker_id=ct.broker_id "
-                                                        "WHERE ct.transaction_id=?", (tid,)).fetchone()
+                                                        "WHERE ct.transaction_id=%s", (tid,)).fetchone()
                                                     _bn2 = _brow2[0] if _brow2 else ""
                                                     conn.execute(
                                                         "INSERT INTO passbook_entries "
                                                         "(firm,entry_date,details,amount,txn_type,"
                                                         " cheque_number,cheque_status,"
                                                         " source_type,source_id) "
-                                                        "VALUES (?,?,?,?,'Credit',?,?,?,?)",
+                                                        "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s,%s)",
                                                         (p_dep_firm,
                                                          chq_date_save or str(p_date),
                                                          f"{txn['customer_name']} (via {_bn2})",
@@ -1422,9 +1428,9 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                         "INSERT INTO cash_in_hand_entries "
                                                         "(entry_date,details,amount,txn_type,"
                                                         " source_type,source_id) "
-                                                        "VALUES (?,?,?,?,?,?)",
+                                                        "VALUES (%s,%s,%s,%s,%s,%s)",
                                                         (str(p_date),
-                                                         f"{txn['customer_name']} (via {bname})",
+                                                         f"Cash from {bname} (Txn: {fmt_date(str(txn['date']))})",
                                                          round(p_amt, 2), 'Credit',
                                                          SRC_CUSTOMER_CASH, new_pmt_id))
                                             st.session_state[log_pmt_key] = False
@@ -1454,22 +1460,22 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                 # ── Passbook sync: revert CustomerAllocation entries ──
                                 conn.execute(
                                     "UPDATE passbook_entries SET details='Suspense',"
-                                    "source_type=?,source_id=NULL "
-                                    "WHERE source_type=? AND source_id=?",
+                                    "source_type=%s,source_id=NULL "
+                                    "WHERE source_type=%s AND source_id=%s",
                                     (SRC_MANUAL, SRC_ALLOCATION, tid))
                                 # ── CASH IN HAND SYNC ──────────────────────────────
                                 try:
                                     conn.execute(
                                         "DELETE FROM cash_in_hand_entries "
-                                        "WHERE source_type=? AND source_id IN ("
+                                        "WHERE source_type=%s AND source_id IN ("
                                         "  SELECT payment_id FROM payments "
-                                        "  WHERE transaction_id=? AND method='Cash'"
+                                        "  WHERE transaction_id=%s AND method='Cash'"
                                         ")", (SRC_CUSTOMER_CASH, tid))
                                 except Exception:
                                     pass
-                                conn.execute("DELETE FROM payments WHERE transaction_id=?", (tid,))
-                                conn.execute("DELETE FROM transaction_items WHERE transaction_id=?", (tid,))
-                                conn.execute("DELETE FROM customer_transactions WHERE transaction_id=?", (tid,))
+                                conn.execute("DELETE FROM payments WHERE transaction_id=%s", (tid,))
+                                conn.execute("DELETE FROM transaction_items WHERE transaction_id=%s", (tid,))
+                                conn.execute("DELETE FROM customer_transactions WHERE transaction_id=%s", (tid,))
                                 conn.commit(); st.rerun()
                         with b3:
                             if has_settle:
@@ -1484,7 +1490,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                             bp_lbl = "✓ Brok. Paid" if brok_paid == "Unpaid" else "✗ Brok. Unpaid"
                             if st.button(bp_lbl, key=f"bp_{tid}", use_container_width=True):
                                 conn.execute(
-                                    "UPDATE customer_transactions SET brokerage_paid=? WHERE transaction_id=?",
+                                    "UPDATE customer_transactions SET brokerage_paid=%s WHERE transaction_id=%s",
                                     ("Paid" if brok_paid == "Unpaid" else "Unpaid", tid))
                                 conn.commit(); st.rerun()
 
@@ -1501,10 +1507,15 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                         d_over_v = int(txn.get("days_overdue", 0) or 0)
                         p_rcvd   = float(df_pmts["amount"].sum()) if not df_pmts.empty else 0.0
 
-                        d_note = f"({d_p}% of A)" if d_p > 0 else "(not applied)"
+                        if d_p == 0.0 and disc_amt > 0:
+                            d_note = "(custom fixed amount)"
+                        elif d_p > 0:
+                            d_note = f"({d_p}% of A)"
+                        else:
+                            d_note = "(not applied)"
                         b_note = "(1% of A)" if b_f else "(not applied)"
-                        i_note = ("(= ₹0 — Discount applied)" if d_p > 0
-                                  else f"({INTEREST_RATE_PCT}% p.a. × {d_over_v} interest days ÷ 365)")
+                        i_note = ("(= ₹0 — Discount applied)" if disc_amt > 0
+                                  else f"({INTEREST_RATE_PCT}% p.a. × {d_over_v} interest days ÷ 360)")
 
                         if settle_val < -0.01:
                             _sv_color = "#6a9fd4"
@@ -1541,7 +1552,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                         prev_brok = bool(txn.get("brokerage_applied", 0))
 
                         pmts_for_calc = float(pd.read_sql(
-                            "SELECT COALESCE(SUM(amount),0) s FROM payments WHERE transaction_id=?",
+                            "SELECT COALESCE(SUM(amount),0) s FROM payments WHERE transaction_id=%s",
                             conn, params=(tid,)).iloc[0]["s"])
 
                         _SETT_METHODS = ["Cash","UPI","Bank Transfer","Cheque"]
@@ -1564,6 +1575,35 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                         else:
                             sett_chq_no, sett_chq_date, sett_dep_firm = None, None, None
 
+                        # Discount section outside form so "Custom Amount" shows dynamically
+                        _prev_disc_amt = float(txn.get("discount_amount", 0) or 0)
+                        if prev_dpct == 0.5:
+                            _disc_default = "0.5%";  _custom_disc_default = ""
+                        elif prev_dpct == 1.0:
+                            _disc_default = "1%";    _custom_disc_default = ""
+                        elif prev_dpct == 0.0 and _prev_disc_amt == 0.0:
+                            _disc_default = "None (0%)"; _custom_disc_default = ""
+                        else:
+                            _disc_default = "Custom Amount"
+                            _custom_disc_default = (
+                                str(_prev_disc_amt).rstrip("0").rstrip(".")
+                                if _prev_disc_amt else "")
+                        _disc_opts = ["None (0%)", "0.5%", "1%", "Custom Amount"]
+                        disc_choice = st.radio(
+                            "Discount", _disc_opts,
+                            index=_disc_opts.index(_disc_default),
+                            horizontal=True, key=f"disc_radio_{tid}")
+                        if disc_choice == "Custom Amount":
+                            custom_disc_amt_s = st.text_input(
+                                "Discount Amount (₹)",
+                                value=_custom_disc_default,
+                                placeholder="e.g. 500 or 1500/50",
+                                help="Enter exact rupee amount to deduct. "
+                                     "Use / as decimal separator.",
+                                key=f"custom_disc_{tid}")
+                        else:
+                            custom_disc_amt_s = ""
+
                         with st.form(f"calc_form_{tid}"):
                             st.markdown(f"**Base Total Amount (A) = {fmt_inr(A)}**")
                             st.markdown('<div class="rule-note">ℹ️ Discount and Interest are mutually exclusive — '
@@ -1571,13 +1611,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                         unsafe_allow_html=True)
                             st.markdown(f'<div class="info-chip">📐 Interest rate: {INTEREST_RATE_PCT}% p.a. (fixed) '
                                         f'| Interest starts after grace period</div>', unsafe_allow_html=True)
-                            cf1, cf2, cf3 = st.columns(3)
-                            with cf1:
-                                disc_choice = st.radio("Discount",
-                                    ["None (0%)","0.5%","1%"],
-                                    index={"None (0%)":0,"0.5%":1,"1%":2}.get(
-                                        "0.5%" if prev_dpct==0.5 else ("1%" if prev_dpct==1.0 else "None (0%)"), 0),
-                                    horizontal=True)
+                            cf2, cf3 = st.columns(2)
                             with cf2:
                                 apply_brok        = st.radio("Brokerage (1% of Total)",["No","Yes"],
                                                              index=1 if prev_brok else 0, horizontal=True)
@@ -1605,15 +1639,32 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                 except Exception:
                                     g_days = DEFAULT_GRACE_DAYS
 
-                                disc_map = {"None (0%)":0.0,"0.5%":0.5,"1%":1.0}
-                                d_pct    = disc_map[disc_choice]
-                                b_flag   = (apply_brok == "Yes")
+                                if disc_choice == "Custom Amount":
+                                    try:
+                                        D_amt = round(parse_slash_amount(custom_disc_amt_s), 2)
+                                    except (ValueError, InvalidOperation):
+                                        st.error("Please enter a valid discount amount.")
+                                        st.stop()
+                                    if D_amt < 0:
+                                        st.error("Discount amount cannot be negative.")
+                                        st.stop()
+                                    if D_amt > A:
+                                        st.error(
+                                            f"Discount ({fmt_inr(D_amt)}) cannot exceed "
+                                            f"Total Bill ({fmt_inr(A)}).")
+                                        st.stop()
+                                    d_pct = 0.0
+                                else:
+                                    disc_map = {"None (0%)": 0.0, "0.5%": 0.5, "1%": 1.0}
+                                    d_pct    = disc_map[disc_choice]
+                                    D_amt    = round(A * d_pct / 100, 2)
+                                b_flag = (apply_brok == "Yes")
 
                                 conn.execute(
-                                    "UPDATE customer_transactions SET interest_rate_pct=?,discount_pct=?,"
-                                    "discount_amount=?,brokerage_applied=?,brokerage_amount=? "
-                                    "WHERE transaction_id=?",
-                                    (INTEREST_RATE_PCT, d_pct, round(A*d_pct/100,2),
+                                    "UPDATE customer_transactions SET interest_rate_pct=%s,discount_pct=%s,"
+                                    "discount_amount=%s,brokerage_applied=%s,brokerage_amount=%s "
+                                    "WHERE transaction_id=%s",
+                                    (INTEREST_RATE_PCT, d_pct, D_amt,
                                      1 if b_flag else 0,
                                      round(A*0.01,2) if b_flag else 0.0, tid))
                                 conn.commit()
@@ -1621,12 +1672,11 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                 res = calculate_final_settlement(tid, settle_date_input, g_days, conn=conn)
 
                                 if not res.get("payments"):
-                                    _istart    = res["interest_start"]
-                                    _int_days  = max((settle_date_input - _istart).days, 0)
+                                    _int_days  = max(_days_30_360(res["start_date"], settle_date_input) - g_days, 0)
                                     _rem_prin  = A - P_val
-                                    _total_i   = 0.0 if d_pct > 0 else round(
-                                        max(_rem_prin, 0) * (INTEREST_RATE_PCT/100) * (_int_days/365), 2)
-                                    _final_bal = round(_rem_prin - round(A*d_pct/100,2) -
+                                    _total_i   = 0.0 if D_amt > 0 else round(
+                                        max(_rem_prin, 0) * (INTEREST_RATE_PCT/100) * (_int_days/360), 2)
+                                    _final_bal = round(_rem_prin - D_amt -
                                                        (round(A*0.01,2) if b_flag else 0.0) + _total_i, 2)
                                     res.update({
                                         "total_interest": _total_i, "final_balance_due": _final_bal,
@@ -1635,6 +1685,17 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                         "remaining_days": max((settle_date_input - res["start_date"]).days,0),
                                         "total_paid": P_val,
                                     })
+
+                                # Custom fixed discount: override calculator which uses disc_pct from DB
+                                if D_amt > 0 and d_pct == 0.0:
+                                    res["discount_amount"]    = D_amt
+                                    res["total_interest"]     = 0.0
+                                    res["remaining_interest"] = 0.0
+                                    for _rp in res.get("payments", []):
+                                        _rp["interest"] = 0.0
+                                    res["final_balance_due"] = round(
+                                        res["remaining_principal"] - D_amt
+                                        - res.get("brokerage_amount", 0.0), 2)
 
                                 res["discount_pct"]    = d_pct
                                 res["grace_days"]      = g_days
@@ -1654,10 +1715,16 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                             P_disp = st.session_state.get(f"preview_P_{tid}", 0)
                             gd_disp= st.session_state.get(f"preview_gd_{tid}", DEFAULT_GRACE_DAYS)
 
-                            i_note = ("(= ₹0 — Discount applied)" if d_p > 0
+                            _preview_disc_amt = r.get("discount_amount", 0) or 0
+                            i_note = ("(= ₹0 — Discount applied)" if _preview_disc_amt > 0
                                       else f"({INTEREST_RATE_PCT}% p.a. × "
-                                           f"{r.get('remaining_int_days',r.get('remaining_days',0))} interest days ÷ 365)")
-                            d_note = f"({d_p}% of A)" if d_p > 0 else "(not applied)"
+                                           f"{r.get('remaining_int_days',r.get('remaining_days',0))} interest days ÷ 360)")
+                            if d_p == 0.0 and _preview_disc_amt > 0:
+                                d_note = "(custom fixed amount)"
+                            elif d_p > 0:
+                                d_note = f"({d_p}% of A)"
+                            else:
+                                d_note = "(not applied)"
                             b_note = "(1% of A)" if b_f else "(not applied)"
 
                             _fbd_r = r["final_balance_due"]
@@ -1695,7 +1762,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                         st.error("Cheque Number is required for Cheque payment.")
                                     else:
                                         _actual_paid = float(conn.execute(
-                                            "SELECT COALESCE(SUM(amount),0) FROM payments WHERE transaction_id=?",
+                                            "SELECT COALESCE(SUM(amount),0) FROM payments WHERE transaction_id=%s",
                                             (tid,)).fetchone()[0])
                                         _p_to_save    = _actual_paid if _actual_paid > 0 else P_disp
                                         _days_overdue = r.get("remaining_int_days", 0)
@@ -1703,25 +1770,25 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                         _sv_chq_dt    = str(sett_chq_date) if sett_chq_date else None
                                         # Reads pulled before the atomic block
                                         _brow4 = conn.execute(
-                                            "SELECT broker_name FROM brokers WHERE broker_id=?",
+                                            "SELECT broker_name FROM brokers WHERE broker_id=%s",
                                             (bid,)).fetchone()
                                         _bn4  = _brow4[0] if _brow4 else ""
                                         _det4 = f"{txn['customer_name']} (via {_bn4})"
                                         _existing_pb = conn.execute(
                                             "SELECT entry_id FROM passbook_entries "
-                                            "WHERE source_type=? AND source_id=?",
+                                            "WHERE source_type=%s AND source_id=%s",
                                             (SRC_CUST_CHQ_TXN, tid)).fetchone()
 
                                         with conn:
                                             conn.execute(
                                                 "UPDATE customer_transactions SET "
-                                                "interest_rate_pct=?,discount_pct=?,discount_amount=?,"
-                                                "brokerage_applied=?,brokerage_amount=?,"
-                                                "interest_amount=?,final_settlement=?,"
-                                                "payment_received=?,grace_days=?,days_overdue=?,"
-                                                "payment_method=?,cheque_number=?,cheque_date=?,"
-                                                "deposit_firm=?,calc_status='Calculated' "
-                                                "WHERE transaction_id=?",
+                                                "interest_rate_pct=%s,discount_pct=%s,discount_amount=%s,"
+                                                "brokerage_applied=%s,brokerage_amount=%s,"
+                                                "interest_amount=%s,final_settlement=%s,"
+                                                "payment_received=%s,grace_days=%s,days_overdue=%s,"
+                                                "payment_method=%s,cheque_number=%s,cheque_date=%s,"
+                                                "deposit_firm=%s,calc_status='Calculated' "
+                                                "WHERE transaction_id=%s",
                                                 (INTEREST_RATE_PCT, d_p, r["discount_amount"],
                                                  1 if b_f else 0, r["brokerage_amount"],
                                                  r["total_interest"], r["final_balance_due"],
@@ -1730,8 +1797,8 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                  sett_dep_firm, tid))
                                             for pmt in r.get("payments", []):
                                                 conn.execute(
-                                                    "UPDATE payments SET interest_charged=?,days_from_start=? "
-                                                    "WHERE payment_id=?",
+                                                    "UPDATE payments SET interest_charged=%s,days_from_start=%s "
+                                                    "WHERE payment_id=%s",
                                                     (pmt["interest"], pmt["days"], pmt["payment_id"]))
                                             log_audit(conn, "customer_transactions", tid, "SETTLEMENT",
                                                       new_value={"final_balance_due": r["final_balance_due"],
@@ -1743,9 +1810,9 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                 if _existing_pb:
                                                     conn.execute(
                                                         "UPDATE passbook_entries "
-                                                        "SET firm=?,entry_date=?,details=?,"
-                                                        "amount=?,cheque_number=? "
-                                                        "WHERE entry_id=?",
+                                                        "SET firm=%s,entry_date=%s,details=%s,"
+                                                        "amount=%s,cheque_number=%s "
+                                                        "WHERE entry_id=%s",
                                                         (sett_dep_firm,
                                                          _sv_chq_dt or str(date.today()),
                                                          _det4,
@@ -1757,7 +1824,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                         "(firm,entry_date,details,amount,txn_type,"
                                                         " cheque_number,cheque_status,"
                                                         " source_type,source_id) "
-                                                        "VALUES (?,?,?,?,'Credit',?,?,?,?)",
+                                                        "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s,%s)",
                                                         (sett_dep_firm,
                                                          _sv_chq_dt or str(date.today()),
                                                          _det4,
@@ -1768,7 +1835,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                             else:
                                                 conn.execute(
                                                     "DELETE FROM passbook_entries "
-                                                    "WHERE source_type=? AND source_id=?",
+                                                    "WHERE source_type=%s AND source_id=%s",
                                                     (SRC_CUST_CHQ_TXN, tid))
                                             # ── CASH IN HAND SYNC — Settlement path ──────────────────
                                             if sett_method == "Cash" and float(P_disp or 0) > 0:
@@ -1777,8 +1844,8 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                     FROM cash_in_hand_entries c
                                                     JOIN payments p
                                                       ON c.source_id = p.payment_id
-                                                     AND c.source_type = ?
-                                                    WHERE p.transaction_id = ?
+                                                     AND c.source_type = %s
+                                                    WHERE p.transaction_id = %s
                                                 """, (SRC_CUSTOMER_CASH, tid)).fetchone()[0]
                                                 _existing_cih = round(float(_existing_cih or 0), 2)
                                                 _sett_amount  = round(float(P_disp), 2)
@@ -1788,10 +1855,10 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                         INSERT INTO cash_in_hand_entries
                                                             (entry_date, details, amount, txn_type,
                                                              source_type, source_id)
-                                                        VALUES (?, ?, ?, 'Credit', ?, ?)
+                                                        VALUES (%s, %s, %s, 'Credit', %s, %s)
                                                     """, (
                                                         str(settle_date_input),
-                                                        _det4,
+                                                        f"Cash from {_bn4} (Txn: {fmt_date(str(txn['date']))})",
                                                         _gap,
                                                         SRC_CUSTOMER_CASH,
                                                         tid
@@ -1852,8 +1919,8 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                     if _u_bs_ok:
                                         conn.execute(
                                             "UPDATE customer_transactions "
-                                            "SET customer_name=?,date=?,payment_status=?,"
-                                            "bill_sent=? WHERE transaction_id=?",
+                                            "SET customer_name=%s,date=%s,payment_status=%s,"
+                                            "bill_sent=%s WHERE transaction_id=%s",
                                             (u_name, str(u_date), u_status, _u_bs_save, tid))
                                         conn.commit()
                                         st.session_state[edit_key] = False; st.rerun()
