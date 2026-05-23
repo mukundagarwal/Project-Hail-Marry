@@ -8,23 +8,23 @@ from utils.db import INTEREST_RATE_PCT
 def _seed_transaction(db, total=10000, bill_date="2026-01-01",
                        discount_pct=0.0, brokerage=False):
     """Helper: insert a broker + transaction, return transaction_id."""
-    db.execute("INSERT INTO brokers (broker_name) VALUES ('Test Broker') ON CONFLICT DO NOTHING")
+    db.execute("INSERT OR IGNORE INTO brokers (broker_name) VALUES ('Test Broker')")
     bid = db.execute(
         "SELECT broker_id FROM brokers WHERE broker_name='Test Broker'"
     ).fetchone()[0]
-    cur = db.execute("""
+    db.execute("""
         INSERT INTO customer_transactions
           (broker_id, customer_name, date, total_amount, payment_status,
            discount_pct, brokerage_applied)
-        VALUES (%s, 'Ramesh', %s, %s, 'Pending', %s, %s) RETURNING transaction_id
+        VALUES (?, 'Ramesh', ?, ?, 'Pending', ?, ?)
     """, (bid, bill_date, total, discount_pct, 1 if brokerage else 0))
-    return cur.fetchone()["transaction_id"]
+    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
 def _add_payment(db, tid, amount, payment_date):
     db.execute("""
         INSERT INTO payments (transaction_id, payment_date, amount, method)
-        VALUES (%s, %s, %s, 'Cash')
+        VALUES (?, ?, ?, 'Cash')
     """, (tid, payment_date, amount))
 
 

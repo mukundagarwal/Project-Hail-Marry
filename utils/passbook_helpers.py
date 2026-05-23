@@ -3,6 +3,7 @@ Pure-Python passbook helpers, extracted from pages/4_Passbook.py so they can
 be imported in tests without triggering Streamlit page side-effects.
 """
 
+import sqlite3
 import pandas as pd
 from datetime import date, datetime
 
@@ -35,7 +36,7 @@ def compute_passbook_view(firm: str, conn=None) -> pd.DataFrame:
         conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT * FROM passbook_entries WHERE firm=%s "
+            "SELECT * FROM passbook_entries WHERE firm=? "
             "ORDER BY entry_date ASC, entry_id ASC",
             (firm,)).fetchall()
     finally:
@@ -166,7 +167,7 @@ def allocate_to_customer(conn, entry_id: int, customer_name: str,
     Returns {"success": bool, "target_txn_id": int|None, "message": str}
     """
     entry = conn.execute(
-        "SELECT * FROM passbook_entries WHERE entry_id=%s", (entry_id,)).fetchone()
+        "SELECT * FROM passbook_entries WHERE entry_id=?", (entry_id,)).fetchone()
     if not entry:
         return {"success": False, "target_txn_id": None, "message": "Passbook entry not found."}
 
@@ -180,7 +181,7 @@ def allocate_to_customer(conn, entry_id: int, customer_name: str,
                COALESCE(SUM(p.amount), 0) AS total_paid
         FROM   customer_transactions ct
         LEFT JOIN payments p ON p.transaction_id = ct.transaction_id
-        WHERE  ct.customer_name = %s
+        WHERE  ct.customer_name = ?
           AND  ct.calc_status  != 'Calculated'
           AND  ct.payment_status != 'Paid'
         GROUP  BY ct.transaction_id
@@ -221,7 +222,7 @@ def allocate_to_customer(conn, entry_id: int, customer_name: str,
         INSERT INTO payments
           (transaction_id, payment_date, amount, method, note,
            days_from_start, interest_charged)
-        VALUES (%s, %s, %s, 'Bank Transfer', %s, %s, 0)
+        VALUES (?, ?, ?, 'Bank Transfer', ?, ?, 0)
     """, (tid, pb_date, pb_amount,
           f"Auto-allocated from passbook #{entry_id}", d_from))
 
@@ -232,20 +233,20 @@ def allocate_to_customer(conn, entry_id: int, customer_name: str,
     new_st    = "Partial" if new_total > 0 else "Pending"
     conn.execute("""
         UPDATE customer_transactions
-        SET    payment_status   = %s,
-               payment_received = %s,
+        SET    payment_status   = ?,
+               payment_received = ?,
                calc_status      = 'Pending',
                final_settlement = NULL,
                interest_amount  = 0
-        WHERE  transaction_id = %s
+        WHERE  transaction_id = ?
     """, (new_st, new_total, tid))
 
     conn.execute("""
         UPDATE passbook_entries
-        SET    details     = %s,
-               source_type = %s,
-               source_id   = %s
-        WHERE  entry_id = %s
+        SET    details     = ?,
+               source_type = ?,
+               source_id   = ?
+        WHERE  entry_id = ?
     """, (customer_name, SRC_ALLOCATION, tid, entry_id))
 
     return {"success": True, "target_txn_id": tid,
@@ -265,7 +266,7 @@ def _unlink_allocation(conn, entry_id: int) -> dict:
     Does NOT commit.
     """
     entry = conn.execute(
-        "SELECT * FROM passbook_entries WHERE entry_id=%s", (entry_id,)).fetchone()
+        "SELECT * FROM passbook_entries WHERE entry_id=?", (entry_id,)).fetchone()
     if not entry:
         return {"success": False, "message": "Entry not found."}
 
@@ -274,34 +275,34 @@ def _unlink_allocation(conn, entry_id: int) -> dict:
         tid = int(tid)
         pmt = conn.execute(
             "SELECT payment_id FROM payments "
-            "WHERE  transaction_id = %s AND note LIKE %s",
+            "WHERE  transaction_id = ? AND note LIKE ?",
             (tid, f"Auto-allocated from passbook #{entry_id}%")).fetchone()
         if pmt:
-            conn.execute("DELETE FROM payments WHERE payment_id=%s", (pmt["payment_id"],))
+            conn.execute("DELETE FROM payments WHERE payment_id=?", (pmt["payment_id"],))
 
         txn_row = conn.execute(
-            "SELECT total_amount FROM customer_transactions WHERE transaction_id=%s",
+            "SELECT total_amount FROM customer_transactions WHERE transaction_id=?",
             (tid,)).fetchone()
         if txn_row:
             new_paid = round(float(conn.execute(
-                "SELECT COALESCE(SUM(amount),0) FROM payments WHERE transaction_id=%s",
+                "SELECT COALESCE(SUM(amount),0) FROM payments WHERE transaction_id=?",
                 (tid,)).fetchone()[0]), 2)
             new_st = "Partial" if new_paid > 0 else "Pending"
             conn.execute("""
                 UPDATE customer_transactions
-                SET    payment_status   = %s,
-                       payment_received = %s,
+                SET    payment_status   = ?,
+                       payment_received = ?,
                        calc_status      = 'Pending',
                        final_settlement = NULL,
                        interest_amount  = 0
-                WHERE  transaction_id = %s
+                WHERE  transaction_id = ?
             """, (new_st, new_paid, tid))
 
     conn.execute("""
         UPDATE passbook_entries
         SET    details     = 'Suspense',
-               source_type = %s,
+               source_type = ?,
                source_id   = NULL
-        WHERE  entry_id = %s
+        WHERE  entry_id = ?
     """, (SRC_MANUAL, entry_id))
     return {"success": True, "message": "Entry unlinked and reverted to Suspense."}

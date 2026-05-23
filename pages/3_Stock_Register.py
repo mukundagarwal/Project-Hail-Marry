@@ -4,11 +4,11 @@ Navigation: st.session_state.stock_page in ("home", "category")
 """
 
 import streamlit as st
-import psycopg2.errors
+import sqlite3
 import pandas as pd
 from datetime import date
 
-from utils.db import get_conn, get_shared_conn, ensure_schema, log_stock_change, purge_old_stock_history
+from utils.db import get_conn, ensure_schema, log_stock_change, purge_old_stock_history
 from utils.styles import APP_CSS, BRAND_BAR_HTML
 from utils.formatters import h, fmt_inr
 
@@ -77,7 +77,7 @@ if st.session_state.stock_page == "home":
         '<div class="page-sub">Live inventory across all locations</div>',
         unsafe_allow_html=True)
 
-    conn = get_shared_conn()
+    conn = get_conn()
     try:
         n_cats   = conn.execute("SELECT COUNT(*) FROM stock_categories").fetchone()[0]
         n_goods  = conn.execute("SELECT COUNT(*) FROM stock_goods").fetchone()[0]
@@ -144,19 +144,18 @@ if st.session_state.stock_page == "home":
                         try:
                             c2 = get_conn()
                             _c2_row = c2.execute(
-                                "INSERT INTO stock_categories (category_name) VALUES (%s) RETURNING category_id", (name,))
-                            _c2_id = _c2_row.fetchone()["category_id"]
+                                "INSERT INTO stock_categories (category_name) VALUES (?)", (name,))
+                            _c2_id = _c2_row.lastrowid
                             for _loc in ["Transport", "Shop", "Anandpuri"]:
                                 c2.execute(
-                                    "INSERT INTO unidentified_stock "
-                                    "(category_id, location, bags, quantity_kg) VALUES (%s,%s,0,0) ON CONFLICT DO NOTHING",
+                                    "INSERT OR IGNORE INTO unidentified_stock "
+                                    "(category_id, location, bags, quantity_kg) VALUES (?,?,0,0)",
                                     (_c2_id, _loc))
                             c2.commit()
                             c2.close()
                             st.success(f"Added '{name}'")
                             st.rerun()
-                        except Exception:
-                            c2.rollback()
+                        except sqlite3.IntegrityError:
                             st.error(f"'{name}' already exists.")
 
         # Category cards
@@ -169,10 +168,10 @@ if st.session_state.stock_page == "home":
                 SELECT COALESCE(SUM(sl.bags),0), COALESCE(SUM(sl.quantity_kg),0)
                 FROM stock_goods sg
                 LEFT JOIN stock_levels sl ON sl.good_id = sg.good_id
-                WHERE sg.category_id = %s""", (cat_id,)).fetchone()
+                WHERE sg.category_id = ?""", (cat_id,)).fetchone()
             _unid_cat = conn.execute(
                 "SELECT COALESCE(SUM(bags),0), COALESCE(SUM(quantity_kg),0) "
-                "FROM unidentified_stock WHERE category_id=%s",
+                "FROM unidentified_stock WHERE category_id=?",
                 (cat_id,)).fetchone()
             total_bags_cat = float(totals[0]) + float(_unid_cat[0])
             total_kg_cat   = float(totals[1]) + float(_unid_cat[1])
@@ -183,14 +182,14 @@ if st.session_state.stock_page == "home":
                        COALESCE(SUM(sl.quantity_kg),0)
                 FROM stock_goods sg
                 LEFT JOIN stock_levels sl ON sl.good_id = sg.good_id
-                WHERE sg.category_id = %s
+                WHERE sg.category_id = ?
                 GROUP BY sl.location""", (cat_id,)).fetchall()
             loc_map = {r[0]: (float(r[1]), float(r[2])) for r in loc_rows}
 
             # Add unidentified stock into per-location map
             _unid_loc_rows = conn.execute(
                 "SELECT location, bags, quantity_kg "
-                "FROM unidentified_stock WHERE category_id=%s",
+                "FROM unidentified_stock WHERE category_id=?",
                 (cat_id,)).fetchall()
             for _ur in _unid_loc_rows:
                 _ul = _ur[0]
@@ -202,7 +201,7 @@ if st.session_state.stock_page == "home":
                     loc_map[_ul] = (_ub, _uk)
 
             n_goods_cat = conn.execute(
-                "SELECT COUNT(*) FROM stock_goods WHERE category_id=%s",
+                "SELECT COUNT(*) FROM stock_goods WHERE category_id=?",
                 (cat_id,)).fetchone()[0]
 
             loc_html = "".join(
@@ -282,11 +281,11 @@ elif st.session_state.stock_page == "category":
         '<div class="page-sub">Location-wise inventory details</div>',
         unsafe_allow_html=True)
 
-    conn = get_shared_conn()
+    conn = get_conn()
     try:
         goods = conn.execute(
             "SELECT good_id, good_name FROM stock_goods "
-            "WHERE category_id=%s ORDER BY good_name",
+            "WHERE category_id=? ORDER BY good_name",
             (cat_id,)).fetchall()
         good_ids   = [g[0] for g in goods]
         good_names = [g[1] for g in goods]
@@ -296,7 +295,7 @@ elif st.session_state.stock_page == "category":
                    sl.bags, sl.quantity_kg
             FROM stock_goods sg
             JOIN stock_levels sl ON sl.good_id = sg.good_id
-            WHERE sg.category_id = %s
+            WHERE sg.category_id = ?
             ORDER BY sg.good_name, sl.location""",
             conn, params=(cat_id,))
 
@@ -333,7 +332,7 @@ elif st.session_state.stock_page == "category":
             _unid_row = conn.execute("""
                 SELECT bags, quantity_kg
                 FROM unidentified_stock
-                WHERE category_id = %s AND location = %s
+                WHERE category_id = ? AND location = ?
             """, (cat_id, loc)).fetchone()
             _unid_bags = float(_unid_row["bags"] or 0) if _unid_row else 0.0
             _unid_kg   = float(_unid_row["quantity_kg"] or 0) if _unid_row else 0.0
@@ -409,8 +408,8 @@ elif st.session_state.stock_page == "category":
                                     pass
                                 conn.execute("""
                                     UPDATE unidentified_stock
-                                       SET bags = %s, quantity_kg = %s
-                                     WHERE category_id = %s AND location = %s
+                                       SET bags = ?, quantity_kg = ?
+                                     WHERE category_id = ? AND location = ?
                                 """, (round(float(_new_ubags), 2),
                                       round(float(_new_ukg), 2),
                                       cat_id, loc))
@@ -494,18 +493,16 @@ elif st.session_state.stock_page == "category":
 
                 # ── Stock history expander ────────────────────────
                 with st.expander("📋 Stock History — last 30 days", expanded=False):
-                    from datetime import datetime as _dt30, timedelta as _td30
-                    _cutoff_30d = (_dt30.now() - _td30(days=30)).strftime("%Y-%m-%d %H:%M:%S")
                     df_hist = pd.read_sql("""
                         SELECT recorded_at, good_name, change_type,
                                bags_before, bags_after, bags_change,
                                kg_before, kg_after, kg_change, source
                         FROM stock_history
-                        WHERE category_name = %s
-                          AND location      = %s
-                          AND recorded_at  >= %s
+                        WHERE category_name = ?
+                          AND location      = ?
+                          AND recorded_at  >= datetime('now', '-30 days')
                         ORDER BY recorded_at DESC
-                    """, conn, params=(cat_name, loc, _cutoff_30d))
+                    """, conn, params=(cat_name, loc))
                     if df_hist.empty:
                         st.markdown(
                             '<div class="empty-state">No stock changes in the last 30 days.</div>',
@@ -675,11 +672,11 @@ elif st.session_state.stock_page == "category":
                             FROM stock_levels sl
                             JOIN stock_goods sg ON sl.good_id = sg.good_id
                             JOIN stock_categories sc ON sg.category_id = sc.category_id
-                            WHERE sl.good_id = %s AND sl.location = %s
+                            WHERE sl.good_id = ? AND sl.location = ?
                         """, (gid, from_loc)).fetchone()
                         _dst_row = conn.execute(
                             "SELECT bags, quantity_kg FROM stock_levels "
-                            "WHERE good_id=%s AND location=%s",
+                            "WHERE good_id=? AND location=?",
                             (gid, to_loc)).fetchone()
                         cur_bags = int(_src_row["bags"] or 0) if _src_row else 0
                         cur_kg   = float(_src_row["quantity_kg"] or 0) if _src_row else 0.0
@@ -707,18 +704,18 @@ elif st.session_state.stock_page == "category":
                             with conn:
                                 conn.execute(
                                     "UPDATE stock_levels "
-                                    "SET bags=bags-%s, quantity_kg=quantity_kg-%s "
-                                    "WHERE good_id=%s AND location=%s",
+                                    "SET bags=bags-?, quantity_kg=quantity_kg-? "
+                                    "WHERE good_id=? AND location=?",
                                     (bags_mv, kg_mv, gid, from_loc))
                                 conn.execute(
                                     "UPDATE stock_levels "
-                                    "SET bags=bags+%s, quantity_kg=quantity_kg+%s "
-                                    "WHERE good_id=%s AND location=%s",
+                                    "SET bags=bags+?, quantity_kg=quantity_kg+? "
+                                    "WHERE good_id=? AND location=?",
                                     (bags_mv, kg_mv, gid, to_loc))
                                 conn.execute(
                                     "INSERT INTO stock_transfers "
                                     "(transfer_date,good_id,from_location,to_location,"
-                                    "bags_moved,kg_moved,note) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                                    "bags_moved,kg_moved,note) VALUES (?,?,?,?,?,?,?)",
                                     (str(transfer_date), gid, from_loc, to_loc,
                                      bags_mv, kg_mv, tf_note.strip()))
                                 try:
@@ -739,7 +736,7 @@ elif st.session_state.stock_page == "category":
                                 except Exception as _e:
                                     import logging
                                     logging.getLogger(__name__).warning(
-                                        "stock_history log failed: %s", _e)
+                                        "stock_history log failed: ?", _e)
                             st.session_state.stock_transfer_loc = None
                             st.success(
                                 f"✓ Transferred {bags_mv:,} bags & {kg_mv:,.1f} Kg of "
@@ -839,15 +836,15 @@ elif st.session_state.stock_page == "category":
                                     FROM stock_levels sl
                                     JOIN stock_goods sg ON sl.good_id = sg.good_id
                                     JOIN stock_categories sc ON sg.category_id = sc.category_id
-                                    WHERE sl.good_id = %s AND sl.location = %s
+                                    WHERE sl.good_id = ? AND sl.location = ?
                                 """, (gid, upd_loc)).fetchone()
                                 _b_bags = float(_before_row["bags"] or 0) if _before_row else 0
                                 _b_kg   = float(_before_row["quantity_kg"] or 0) if _before_row else 0.0
                                 _a_bags = float(nb)
                                 _a_kg   = float(nk)
                                 conn.execute(
-                                    "UPDATE stock_levels SET bags=%s, quantity_kg=%s "
-                                    "WHERE good_id=%s AND location=%s",
+                                    "UPDATE stock_levels SET bags=?, quantity_kg=? "
+                                    "WHERE good_id=? AND location=?",
                                     (nb, nk, gid, upd_loc))
                                 if abs(_b_bags - _a_bags) > 0.001 or abs(_b_kg - _a_kg) > 0.001:
                                     try:
@@ -862,7 +859,7 @@ elif st.session_state.stock_page == "category":
                                     except Exception as _e:
                                         import logging
                                         logging.getLogger(__name__).warning(
-                                            "stock_history log failed: %s", _e)
+                                            "stock_history log failed: ?", _e)
                         st.session_state.stock_update_loc = None
                         st.success(f"✓ Stock at {upd_loc} updated successfully.")
                         st.rerun()
@@ -883,7 +880,7 @@ elif st.session_state.stock_page == "category":
                         "UPDATE stock_levels "
                         "SET bags        = CASE WHEN bags        < 0 THEN 0 ELSE bags        END, "
                         "    quantity_kg = CASE WHEN quantity_kg < 0 THEN 0 ELSE quantity_kg END "
-                        "WHERE location = %s",
+                        "WHERE location = ?",
                         (upd_loc,))
                     conn.commit()
                     st.success(f"✓ All negative values at {upd_loc} reset to 0.")
@@ -935,9 +932,9 @@ elif st.session_state.stock_page == "category":
                     else:
                         try:
                             cur = conn.execute(
-                                "INSERT INTO stock_goods (category_id, good_name) VALUES (%s,%s) RETURNING good_id",
+                                "INSERT INTO stock_goods (category_id, good_name) VALUES (?,?)",
                                 (cat_id, gname))
-                            new_gid = cur.fetchone()["good_id"]
+                            new_gid = cur.lastrowid
                             loc_init = {
                                 "Transport": (ag_bags_t, ag_kg_t),
                                 "Shop":      (ag_bags_s, ag_kg_s),
@@ -945,14 +942,13 @@ elif st.session_state.stock_page == "category":
                             }
                             for loc_n, (b, k) in loc_init.items():
                                 conn.execute(
-                                    "INSERT INTO stock_levels "
-                                    "(good_id, location, bags, quantity_kg) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                                    "INSERT OR IGNORE INTO stock_levels "
+                                    "(good_id, location, bags, quantity_kg) VALUES (?,?,?,?)",
                                     (new_gid, loc_n, b, k))
                             conn.commit()
                             st.success(f"✓ Added '{gname}' to {cat_name}.")
                             st.rerun()
-                        except Exception:
-                            conn.rollback()
+                        except sqlite3.IntegrityError:
                             st.error(f"'{gname}' already exists in {cat_name}.")
 
     finally:

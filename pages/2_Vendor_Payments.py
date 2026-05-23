@@ -9,11 +9,11 @@ Sign convention (from OUR perspective):
 """
 
 import streamlit as st
-import psycopg2.errors
+import sqlite3
 import pandas as pd
 from datetime import date
 
-from utils.db import (get_conn, get_shared_conn, FIRM_SP, FIRM_MT, SRC_VENDOR_RTGS, SRC_VENDOR_UB,
+from utils.db import (get_conn, FIRM_SP, FIRM_MT, SRC_VENDOR_RTGS, SRC_VENDOR_UB,
                       log_stock_change, add_unidentified_stock, reverse_unidentified_stock)
 from utils.styles import APP_CSS, BRAND_BAR_HTML
 from utils.formatters import fmt_inr, fmt_date, h, parse_slash_amount
@@ -34,7 +34,7 @@ st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
 # ══════════════════════════════════════════════════════════════
 
 def ensure_vendor_schema():
-    conn = get_shared_conn()
+    conn = get_conn()
     try:
         conn.execute("""CREATE TABLE IF NOT EXISTS vendors (
             vendor_id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,7 +97,7 @@ def reverse_bill_stock(conn, good_id: int, bags: int, kg: float):
     """
     row = conn.execute(
         "SELECT bags, quantity_kg FROM stock_levels "
-        "WHERE good_id=%s AND location='Transport'",
+        "WHERE good_id=? AND location='Transport'",
         (good_id,)).fetchone()
     if not row:
         return f"Stock row not found for good_id={good_id} — stock not reversed."
@@ -109,8 +109,8 @@ def reverse_bill_stock(conn, good_id: int, bags: int, kg: float):
         warning = (f"Reversal produced negative stock "
                    f"(bags: {new_bags}, kg: {new_kg:.1f}).")
     conn.execute(
-        "UPDATE stock_levels SET bags=%s, quantity_kg=%s "
-        "WHERE good_id=%s AND location='Transport'",
+        "UPDATE stock_levels SET bags=?, quantity_kg=? "
+        "WHERE good_id=? AND location='Transport'",
         (new_bags, new_kg, good_id))
     return warning
 
@@ -160,24 +160,23 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                 if nm:
                     try:
                         _nc_row = conn.execute(
-                            "INSERT INTO stock_categories (category_name) VALUES (%s) RETURNING category_id", (nm,))
-                        _nc_id = _nc_row.fetchone()["category_id"]
+                            "INSERT INTO stock_categories (category_name) VALUES (?)", (nm,))
+                        _nc_id = _nc_row.lastrowid
                         for _loc in ["Transport", "Shop", "Anandpuri"]:
                             conn.execute(
-                                "INSERT INTO unidentified_stock "
-                                "(category_id, location, bags, quantity_kg) VALUES (%s,%s,0,0) ON CONFLICT DO NOTHING",
+                                "INSERT OR IGNORE INTO unidentified_stock "
+                                "(category_id, location, bags, quantity_kg) VALUES (?,?,0,0)",
                                 (_nc_id, _loc))
                         conn.commit()
                         st.success(f"Added '{nm}'")
                         st.rerun()
-                    except Exception:
-                        conn.rollback()
+                    except sqlite3.IntegrityError:
                         st.error("Category already exists.")
 
         # Goods name — optional; "— Not specified —" means category-only or no goods info
         _goods_raw = (conn.execute(
             "SELECT good_id, good_name FROM stock_goods "
-            "WHERE category_id=%s ORDER BY good_name", (sel_cat_id,)).fetchall()
+            "WHERE category_id=? ORDER BY good_name", (sel_cat_id,)).fetchall()
             if sel_cat_id else [])
         _good_opt_labels = ["— Not specified —"] + [r[1] for r in _goods_raw]
         _good_opt_ids    = [None] + [r[0] for r in _goods_raw]
@@ -195,19 +194,18 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                 if nm:
                     try:
                         cur = conn.execute(
-                            "INSERT INTO stock_goods (category_id, good_name) VALUES (%s,%s) RETURNING good_id",
+                            "INSERT INTO stock_goods (category_id, good_name) VALUES (?,?)",
                             (sel_cat_id, nm))
-                        gid = cur.fetchone()["good_id"]
+                        gid = cur.lastrowid
                         for loc in ["Transport", "Shop", "Anandpuri"]:
                             conn.execute(
-                                "INSERT INTO stock_levels "
-                                "(good_id, location, bags, quantity_kg) VALUES (%s,%s,0,0) ON CONFLICT DO NOTHING",
+                                "INSERT OR IGNORE INTO stock_levels "
+                                "(good_id, location, bags, quantity_kg) VALUES (?,?,0,0)",
                                 (gid, loc))
                         conn.commit()
                         st.success(f"Added '{nm}'")
                         st.rerun()
-                    except Exception:
-                        conn.rollback()
+                    except sqlite3.IntegrityError:
                         st.error("Good already exists.")
 
         bc1, bc2 = st.columns(2)
@@ -251,7 +249,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                 st.error("Please select a category.")
             else:
                 _vn_row = conn.execute(
-                    "SELECT vendor_name FROM vendors WHERE vendor_id=%s",
+                    "SELECT vendor_name FROM vendors WHERE vendor_id=?",
                     (vendor_id,)).fetchone()
                 _vn_str = _vn_row[0] if _vn_row else f"Vendor #{vendor_id}"
 
@@ -271,7 +269,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                             FROM stock_levels sl
                             JOIN stock_goods sg ON sl.good_id = sg.good_id
                             JOIN stock_categories sc ON sg.category_id = sc.category_id
-                            WHERE sl.good_id = %s AND sl.location = 'Transport'
+                            WHERE sl.good_id = ? AND sl.location = 'Transport'
                         """, (sel_good_id,)).fetchone()
                         _vh_b_bags = float(_vh_row["bags"] or 0) if _vh_row else 0
                         _vh_b_kg   = float(_vh_row["quantity_kg"] or 0) if _vh_row else 0.0
@@ -282,14 +280,14 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                                 """INSERT INTO vendor_entries
                                    (vendor_id,entry_date,ledger_type,firm,entry_kind,
                                     particulars,amount,good_id,bags,quantity_kg,note)
-                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                                 (vendor_id, str(b_date), ledger_type, firm,
                                  "Bill", sel_cat_name, -amt,
                                  sel_good_id, round(float(_bags_val), 2),
                                  round(float(_kg_val), 2), note_s.strip()))
                             conn.execute(
-                                "UPDATE stock_levels SET bags=bags+%s, quantity_kg=quantity_kg+%s "
-                                "WHERE good_id=%s AND location='Transport'",
+                                "UPDATE stock_levels SET bags=bags+?, quantity_kg=quantity_kg+? "
+                                "WHERE good_id=? AND location='Transport'",
                                 (round(float(_bags_val), 2), round(float(_kg_val), 2),
                                  sel_good_id))
                             try:
@@ -301,7 +299,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                             except Exception as _e:
                                 import logging
                                 logging.getLogger(__name__).warning(
-                                    "stock_history log failed: %s", _e)
+                                    "stock_history log failed: ?", _e)
                         st.success(f"Bill of {fmt_inr(amt)} saved. Transport stock updated.")
                         st.rerun()
 
@@ -317,7 +315,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                             """INSERT INTO vendor_entries
                                (vendor_id,entry_date,ledger_type,firm,entry_kind,
                                 particulars,amount,good_id,bags,quantity_kg,note)
-                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                             (vendor_id, str(b_date), ledger_type, firm,
                              "Bill", sel_cat_name, -amt,
                              None, round(float(_bags_val), 2), round(float(_kg_val), 2),
@@ -332,7 +330,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                         except Exception as _e:
                             import logging
                             logging.getLogger(__name__).warning(
-                                "Unidentified stock update failed: %s", _e)
+                                "Unidentified stock update failed: ?", _e)
                     st.success(f"Bill of {fmt_inr(amt)} saved. Unidentified stock updated.")
                     st.rerun()
 
@@ -342,7 +340,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                             """INSERT INTO vendor_entries
                                (vendor_id,entry_date,ledger_type,firm,entry_kind,
                                 particulars,amount,good_id,bags,quantity_kg,note)
-                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                             (vendor_id, str(b_date), ledger_type, firm,
                              "Bill", sel_cat_name, -amt,
                              None, 0, 0.0, note_s.strip()))
@@ -372,12 +370,12 @@ def _payment_popover(vendor_id: int, ledger_type: str, firm, conn):
                         """INSERT INTO vendor_entries
                            (vendor_id,entry_date,ledger_type,firm,entry_kind,
                             particulars,amount,good_id,bags,quantity_kg,note)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,0,0,%s) RETURNING entry_id""",
+                           VALUES (?,?,?,?,?,?,?,NULL,0,0,?)""",
                         (vendor_id, str(p_date), ledger_type, firm,
                          "Payment", particulars, p_amt, note_s.strip()))
-                    new_eid = cur.fetchone()["entry_id"]
+                    new_eid = cur.lastrowid
                     _vrow  = conn.execute(
-                        "SELECT vendor_name FROM vendors WHERE vendor_id=%s",
+                        "SELECT vendor_name FROM vendors WHERE vendor_id=?",
                         (vendor_id,)).fetchone()
                     _vname = _vrow[0] if _vrow else f"Vendor #{vendor_id}"
                     # ── Passbook sync: RTGS payments debit the bank account ──
@@ -386,14 +384,14 @@ def _payment_popover(vendor_id: int, ledger_type: str, firm, conn):
                             "INSERT INTO passbook_entries "
                             "(firm,entry_date,details,amount,txn_type,"
                             " source_type,source_id) "
-                            "VALUES (%s,%s,%s,%s,'Debit',%s,%s)",
+                            "VALUES (?,?,?,?,'Debit',?,?)",
                             (firm, str(p_date), _vname, p_amt, SRC_VENDOR_RTGS, new_eid))
                     # ── CASH IN HAND SYNC ──────────────────────────────
                     if ledger_type == "UB":
                         conn.execute(
                             "INSERT INTO cash_in_hand_entries "
                             "(entry_date,details,amount,txn_type,source_type,source_id) "
-                            "VALUES (%s,%s,%s,%s,%s,%s)",
+                            "VALUES (?,?,?,?,?,?)",
                             (str(p_date), _vname, p_amt, 'Debit', SRC_VENDOR_UB, new_eid))
                 st.success(f"Payment of {fmt_inr(p_amt)} recorded.")
                 st.rerun()
@@ -416,7 +414,7 @@ def _edit_form(entry_row, conn):
             f"{_pd['good_name']}: {_pd['preview_bags']} bags / "
             f"{_pd['preview_kg']:.1f} kg. "
             f"This usually means goods were sold after the bill was recorded. "
-            f"Save anyway%s")
+            f"Save anyway?")
         _sa1, _sa2, _ = st.columns([1.2, 1, 5.8])
         with _sa1:
             if st.button("💾 Save Anyway", key=f"vp_sa_{entry_id}",
@@ -430,8 +428,8 @@ def _edit_form(entry_row, conn):
                 _sa_mode = _p.get("new_mode", "A")
                 if _sa_mode == "A":
                     conn.execute(
-                        "UPDATE stock_levels SET bags=bags+%s, quantity_kg=quantity_kg+%s "
-                        "WHERE good_id=%s AND location='Transport'",
+                        "UPDATE stock_levels SET bags=bags+?, quantity_kg=quantity_kg+? "
+                        "WHERE good_id=? AND location='Transport'",
                         (_p["new_bags"], _p["new_kg"], _p["new_good_id"]))
                 elif _sa_mode == "B":
                     _nc = _p.get("new_cat_id")
@@ -443,8 +441,8 @@ def _edit_form(entry_row, conn):
                 # MODE C: no stock update
                 conn.execute(
                     "UPDATE vendor_entries "
-                    "SET entry_date=%s,particulars=%s,amount=%s,"
-                    "good_id=%s,bags=%s,quantity_kg=%s,firm=%s,note=%s WHERE entry_id=%s",
+                    "SET entry_date=?,particulars=?,amount=?,"
+                    "good_id=?,bags=?,quantity_kg=?,firm=?,note=? WHERE entry_id=?",
                     (_p["new_date"], _p["new_cat_name"], _p["new_amt_neg"],
                      _p["new_good_id"], _p["new_bags"], _p["new_kg"],
                      _p["new_firm"], _p.get("new_note", ""), entry_id))
@@ -585,7 +583,7 @@ def _edit_form(entry_row, conn):
                         _gid_old = int(_old_good_id_val)
                         _sl_row = conn.execute(
                             "SELECT bags, quantity_kg FROM stock_levels "
-                            "WHERE good_id=%s AND location='Transport'",
+                            "WHERE good_id=? AND location='Transport'",
                             (_gid_old,)).fetchone()
                         if _sl_row:
                             _same_good    = (new_good_id == _gid_old)
@@ -595,7 +593,7 @@ def _edit_form(entry_row, conn):
                                              + (float(new_kg) if _same_good else 0.0))
                             if _preview_bags < 0 or _preview_kg < 0:
                                 _gname_row = conn.execute(
-                                    "SELECT good_name FROM stock_goods WHERE good_id=%s",
+                                    "SELECT good_name FROM stock_goods WHERE good_id=?",
                                     (_gid_old,)).fetchone()
                                 _gname = (_gname_row[0] if _gname_row
                                           else f"good_id={_gid_old}")
@@ -609,7 +607,7 @@ def _edit_form(entry_row, conn):
                                     "new_cat_name":   _new_part,
                                     "new_cat_id":     conn.execute(
                                         "SELECT category_id FROM stock_categories "
-                                        "WHERE category_name=%s",
+                                        "WHERE category_name=?",
                                         (_new_part,)).fetchone(),
                                     "new_date":       str(new_date),
                                     "new_bags":       int(new_bags),
@@ -632,7 +630,7 @@ def _edit_form(entry_row, conn):
                             # Old bill was MODE B — reverse unidentified stock
                             _oc_row = conn.execute(
                                 "SELECT category_id FROM stock_categories "
-                                "WHERE category_name=%s",
+                                "WHERE category_name=?",
                                 (_old_particulars,)).fetchone()
                             if _oc_row:
                                 reverse_unidentified_stock(
@@ -646,13 +644,13 @@ def _edit_form(entry_row, conn):
                         if _edit_new_mode == "A":
                             conn.execute(
                                 "UPDATE stock_levels "
-                                "SET bags=bags+%s, quantity_kg=quantity_kg+%s "
-                                "WHERE good_id=%s AND location='Transport'",
+                                "SET bags=bags+?, quantity_kg=quantity_kg+? "
+                                "WHERE good_id=? AND location='Transport'",
                                 (int(new_bags), float(new_kg), new_good_id))
                         elif _edit_new_mode == "B":
                             _nc_row = conn.execute(
                                 "SELECT category_id FROM stock_categories "
-                                "WHERE category_name=%s",
+                                "WHERE category_name=?",
                                 (_new_part,)).fetchone()
                             if _nc_row:
                                 add_unidentified_stock(
@@ -661,8 +659,8 @@ def _edit_form(entry_row, conn):
 
                         conn.execute(
                             "UPDATE vendor_entries "
-                            "SET entry_date=%s,particulars=%s,amount=%s,"
-                            "good_id=%s,bags=%s,quantity_kg=%s,firm=%s,note=%s WHERE entry_id=%s",
+                            "SET entry_date=?,particulars=?,amount=?,"
+                            "good_id=?,bags=?,quantity_kg=?,firm=?,note=? WHERE entry_id=?",
                             (str(new_date), _new_part, -new_amt,
                              new_good_id, int(new_bags), float(new_kg),
                              new_firm, edit_note.strip(), entry_id))
@@ -675,21 +673,21 @@ def _edit_form(entry_row, conn):
                 else:
                     with conn:
                         conn.execute(
-                            "UPDATE vendor_entries SET entry_date=%s,amount=%s,firm=%s,note=%s "
-                            "WHERE entry_id=%s",
+                            "UPDATE vendor_entries SET entry_date=?,amount=?,firm=?,note=? "
+                            "WHERE entry_id=?",
                             (str(new_date), new_amt, new_firm, edit_note.strip(), entry_id))
                         # ── Passbook sync: update linked RTGS passbook entry ──
                         if entry_row.get("ledger_type") == "RTGS" and entry_row.get("firm"):
                             conn.execute(
                                 "UPDATE passbook_entries "
-                                "SET entry_date=%s,amount=%s,firm=%s "
-                                "WHERE source_type=%s AND source_id=%s",
+                                "SET entry_date=?,amount=?,firm=? "
+                                "WHERE source_type=? AND source_id=?",
                                 (str(new_date), new_amt, new_firm, SRC_VENDOR_RTGS, entry_id))
                         # ── CASH IN HAND SYNC ──────────────────────────────
                         if entry_row.get("ledger_type") == "UB":
                             conn.execute(
-                                "UPDATE cash_in_hand_entries SET entry_date=%s,amount=%s "
-                                "WHERE source_type=%s AND source_id=%s",
+                                "UPDATE cash_in_hand_entries SET entry_date=?,amount=? "
+                                "WHERE source_type=? AND source_id=?",
                                 (str(new_date), new_amt, SRC_VENDOR_UB, entry_id))
                     st.session_state[f"vp_edit_{entry_id}"] = False
                     st.success("Payment updated.")
@@ -708,7 +706,7 @@ def _delete_confirm(entry_row, conn):
         f'<div style="background:#1e0808;border:1px solid #6a1a1a;border-radius:8px;'
         f'padding:0.6rem 1rem;margin:0.2rem 0">'
         f'<span style="color:#ff8080;font-size:0.83rem">'
-        f'⚠️ Delete {ek} #{entry_id}%s{note}</span></div>',
+        f'⚠️ Delete {ek} #{entry_id}?{note}</span></div>',
         unsafe_allow_html=True)
     dc1, dc2, _ = st.columns([0.9, 0.9, 6])
     with dc1:
@@ -727,7 +725,7 @@ def _delete_confirm(entry_row, conn):
                         # MODE B: reverse unidentified stock
                         _dc_row = conn.execute(
                             "SELECT category_id FROM stock_categories "
-                            "WHERE category_name=%s",
+                            "WHERE category_name=?",
                             (str(entry_row["particulars"]),)).fetchone()
                         if _dc_row:
                             reverse_unidentified_stock(
@@ -738,18 +736,18 @@ def _delete_confirm(entry_row, conn):
                 if ek == "Payment" and entry_row.get("ledger_type") == "RTGS":
                     conn.execute(
                         "DELETE FROM passbook_entries "
-                        "WHERE source_type=%s AND source_id=%s",
+                        "WHERE source_type=? AND source_id=?",
                         (SRC_VENDOR_RTGS, entry_id))
                 # ── CASH IN HAND SYNC ──────────────────────────────
                 if ek == "Payment" and entry_row.get("ledger_type") == "UB":
                     try:
                         conn.execute(
                             "DELETE FROM cash_in_hand_entries "
-                            "WHERE source_type=%s AND source_id=%s",
+                            "WHERE source_type=? AND source_id=?",
                             (SRC_VENDOR_UB, entry_id))
                     except Exception:
                         pass
-                conn.execute("DELETE FROM vendor_entries WHERE entry_id=%s", (entry_id,))
+                conn.execute("DELETE FROM vendor_entries WHERE entry_id=?", (entry_id,))
             st.session_state[f"vp_del_{entry_id}"] = False
             st.rerun()
     with dc2:
@@ -907,7 +905,8 @@ if st.session_state.vp_page == "home":
     st.markdown('<div class="page-title">Vendor Payments</div>', unsafe_allow_html=True)
     st.markdown('<div class="page-sub">Vendor directory</div>', unsafe_allow_html=True)
 
-    conn = get_shared_conn()
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
 
     try:
         n_vendors  = conn.execute("SELECT COUNT(*) FROM vendors").fetchone()[0]
@@ -948,14 +947,16 @@ if st.session_state.vp_page == "home":
                         st.error("Name cannot be empty.")
                     else:
                         try:
+                            max_id = conn.execute(
+                                "SELECT COALESCE(MAX(vendor_id),100) FROM vendors"
+                            ).fetchone()[0]
                             conn.execute(
-                                "INSERT INTO vendors (vendor_name) VALUES (%s)",
-                                (nm,))
+                                "INSERT INTO vendors (vendor_id, vendor_name) VALUES (?,?)",
+                                (int(max_id) + 1, nm))
                             conn.commit()
                             st.success(f"Added '{nm}'")
                             st.rerun()
-                        except Exception:
-                            conn.rollback()
+                        except sqlite3.IntegrityError:
                             st.error(f"'{nm}' already exists.")
 
         st.markdown("<hr>", unsafe_allow_html=True)
@@ -1017,7 +1018,7 @@ if st.session_state.vp_page == "home":
                                 f'<div style="background:#1e0808;border:1px solid #6a1a1a;'
                                 f'border-radius:8px;padding:0.7rem 1rem;margin-bottom:0.4rem">'
                                 f'<div style="color:#ff8080;font-size:0.83rem;font-weight:600">'
-                                f'Delete {h(vname)}%s</div>'
+                                f'Delete {h(vname)}?</div>'
                                 f'<div style="color:#8a5050;font-size:0.75rem;margin-top:3px">'
                                 f'All entries deleted. Bill stock reversed.</div></div>',
                                 unsafe_allow_html=True)
@@ -1030,7 +1031,7 @@ if st.session_state.vp_page == "home":
                                         bills = conn.execute(
                                             "SELECT good_id, bags, quantity_kg "
                                             "FROM vendor_entries "
-                                            "WHERE vendor_id=%s AND entry_kind='Bill' "
+                                            "WHERE vendor_id=? AND entry_kind='Bill' "
                                             "AND good_id IS NOT NULL", (vid,)).fetchall()
                                         for b in bills:
                                             reverse_bill_stock(conn, b[0], b[1], b[2])
@@ -1038,12 +1039,12 @@ if st.session_state.vp_page == "home":
                                         unid_bills = conn.execute(
                                             "SELECT particulars, bags, quantity_kg "
                                             "FROM vendor_entries "
-                                            "WHERE vendor_id=%s AND entry_kind='Bill' "
+                                            "WHERE vendor_id=? AND entry_kind='Bill' "
                                             "AND good_id IS NULL AND bags > 0", (vid,)).fetchall()
                                         for ub in unid_bills:
                                             _uc_row = conn.execute(
                                                 "SELECT category_id FROM stock_categories "
-                                                "WHERE category_name=%s",
+                                                "WHERE category_name=?",
                                                 (str(ub[0]),)).fetchone()
                                             if _uc_row:
                                                 reverse_unidentified_stock(
@@ -1051,22 +1052,22 @@ if st.session_state.vp_page == "home":
                                                     float(ub[1]), float(ub[2]))
                                         conn.execute(
                                             "DELETE FROM passbook_entries "
-                                            "WHERE source_type=%s AND source_id IN ("
+                                            "WHERE source_type=? AND source_id IN ("
                                             "  SELECT entry_id FROM vendor_entries "
-                                            "  WHERE vendor_id=%s AND entry_kind='Payment'"
+                                            "  WHERE vendor_id=? AND entry_kind='Payment'"
                                             ")", (SRC_VENDOR_RTGS, vid))
                                         # ── CASH IN HAND SYNC ──────────────────────────────
                                         conn.execute(
                                             "DELETE FROM cash_in_hand_entries "
-                                            "WHERE source_type=%s AND source_id IN ("
+                                            "WHERE source_type=? AND source_id IN ("
                                             "  SELECT entry_id FROM vendor_entries "
-                                            "  WHERE vendor_id=%s AND ledger_type='UB'"
+                                            "  WHERE vendor_id=? AND ledger_type='UB'"
                                             "  AND entry_kind='Payment'"
                                             ")", (SRC_VENDOR_UB, vid))
                                         conn.execute(
-                                            "DELETE FROM vendor_entries WHERE vendor_id=%s", (vid,))
+                                            "DELETE FROM vendor_entries WHERE vendor_id=?", (vid,))
                                         conn.execute(
-                                            "DELETE FROM vendors WHERE vendor_id=%s", (vid,))
+                                            "DELETE FROM vendors WHERE vendor_id=?", (vid,))
                                     st.session_state.pop(f"vp_del_vendor_{vid}", None)
                                     st.rerun()
                             with dc2:
@@ -1095,14 +1096,15 @@ elif st.session_state.vp_page == "vendor":
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-    conn = get_shared_conn()
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
 
     try:
         row = conn.execute(
             "SELECT COALESCE(SUM(CASE WHEN amount<0 THEN amount ELSE 0 END),0) bills,"
             "COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) pmts,"
             "COALESCE(SUM(amount),0) net, COUNT(*) cnt "
-            "FROM vendor_entries WHERE vendor_id=%s", (vid,)).fetchone()
+            "FROM vendor_entries WHERE vendor_id=?", (vid,)).fetchone()
         bills_val = float(row["bills"])
         pmts_val  = float(row["pmts"])
         net_val   = round(float(row["net"]), 2)
@@ -1161,7 +1163,7 @@ elif st.session_state.vp_page == "vendor":
             unsafe_allow_html=True)
 
         df_all = pd.read_sql(
-            "SELECT * FROM vendor_entries WHERE vendor_id=%s "
+            "SELECT * FROM vendor_entries WHERE vendor_id=? "
             "ORDER BY entry_date ASC, entry_id ASC",
             conn, params=(vid,))
 
@@ -1202,7 +1204,8 @@ elif st.session_state.vp_page == "rtgs":
     # Map UI label to DB value
     firm_db = FIRM_SP if firm == FIRM_SP else FIRM_MT
 
-    conn = get_shared_conn()
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
 
     try:
         # Action buttons
@@ -1222,7 +1225,7 @@ elif st.session_state.vp_page == "rtgs":
 
         df_rtgs = pd.read_sql(
             "SELECT * FROM vendor_entries "
-            "WHERE vendor_id=%s AND ledger_type='RTGS' AND firm=%s "
+            "WHERE vendor_id=? AND ledger_type='RTGS' AND firm=? "
             "ORDER BY entry_date ASC, entry_id ASC",
             conn, params=(vid, firm_db))
 
@@ -1252,7 +1255,8 @@ elif st.session_state.vp_page == "ub":
         f'<div class="page-title">{h(vname)} — UB Ledger</div>',
         unsafe_allow_html=True)
 
-    conn = get_shared_conn()
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
 
     try:
         ab1, ab2, _ = st.columns([1.2, 1.4, 5.4], gap="small")
@@ -1265,7 +1269,7 @@ elif st.session_state.vp_page == "ub":
 
         df_ub = pd.read_sql(
             "SELECT * FROM vendor_entries "
-            "WHERE vendor_id=%s AND ledger_type='UB' "
+            "WHERE vendor_id=? AND ledger_type='UB' "
             "ORDER BY entry_date ASC, entry_id ASC",
             conn, params=(vid,))
 

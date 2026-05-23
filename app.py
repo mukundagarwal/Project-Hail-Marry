@@ -5,6 +5,8 @@ All feature logic lives in pages/ and shared utils live in utils/.
 """
 
 import streamlit as st
+from utils.db import ensure_schema
+from utils.styles import APP_CSS, BRAND_BAR_HTML
 
 st.set_page_config(
     page_title="S P Spices – Business Diary",
@@ -12,22 +14,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-
-# ── Authentication gate ────────────────────────────────────────
-if not st.session_state.get("authenticated"):
-    st.markdown("## S P Spices – Business Diary")
-    pwd = st.text_input("Password", type="password", key="login_pwd")
-    if st.button("Login", use_container_width=False):
-        if pwd == "Mukund@2806":
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
-    st.stop()
-# ──────────────────────────────────────────────────────────────
-
-from utils.db import ensure_schema
-from utils.styles import APP_CSS, BRAND_BAR_HTML
 
 ensure_schema()
 

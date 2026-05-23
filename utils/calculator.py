@@ -51,7 +51,7 @@ def calculate_final_settlement(transaction_id: int,
         conn = get_conn()
     try:
         txn = conn.execute(
-            "SELECT * FROM customer_transactions WHERE transaction_id=%s",
+            "SELECT * FROM customer_transactions WHERE transaction_id=?",
             (transaction_id,)
         ).fetchone()
         if txn is None:
@@ -72,7 +72,7 @@ def calculate_final_settlement(transaction_id: int,
         interest_start = start_date + timedelta(days=grace_days)
 
         pmts_rows = conn.execute(
-            "SELECT * FROM payments WHERE transaction_id=%s ORDER BY payment_date ASC",
+            "SELECT * FROM payments WHERE transaction_id=? ORDER BY payment_date ASC",
             (transaction_id,)
         ).fetchall()
 

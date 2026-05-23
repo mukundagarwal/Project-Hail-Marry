@@ -1,27 +1,18 @@
 import pytest
+import sqlite3
 import sys
 import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from utils.db import get_conn, ensure_schema
-
-_ALL_TABLES = (
-    "audit_log, vendor_entries, vendors, "
-    "cash_in_hand_entries, cash_in_hand_opening, "
-    "passbook_entries, passbook_opening_balance, "
-    "payments, transaction_items, customer_transactions, brokers, "
-    "stock_transfers, stock_history, stock_levels, "
-    "unidentified_stock, stock_goods, stock_categories"
-)
+from utils.db import ensure_schema
 
 
 @pytest.fixture
 def db():
-    """Fresh PostgreSQL DB state for each test: truncate all tables then re-seed."""
-    conn = get_conn()
-    conn.execute(f"TRUNCATE TABLE {_ALL_TABLES} RESTART IDENTITY")
-    conn.commit()
+    """Fresh in-memory SQLite DB with full schema for each test."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
     ensure_schema(conn=conn)
     yield conn
     conn.close()
