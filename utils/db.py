@@ -1,11 +1,24 @@
 """
 Database connection, schema, constants, and audit helper.
 All other modules import constants and DB helpers from here.
+Uses PostgreSQL (Supabase) via psycopg2.
 """
 
-import sqlite3
+import os
 import json
+import threading
+import psycopg2
+import psycopg2.extras
+import psycopg2.pool
+import psycopg2.extensions
+import pandas as pd
 from datetime import date as _date
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # ── Business constants ─────────────────────────────────────────
 INTEREST_RATE_PCT  = 24.0     # single source of truth
@@ -28,7 +41,7 @@ SRC_OPENING      = "Opening"
 # ── Cash in Hand source types ──────────────────────────────────
 SRC_CUSTOMER_CASH = "CustomerCash"
 SRC_VENDOR_UB     = "VendorUB"
-SRC_CIH_OPENING   = "CIHOpening"   # distinct from SRC_OPENING to prevent cross-table confusion
+SRC_CIH_OPENING   = "CIHOpening"
 
 # ── Cheque statuses ─────────────────────────────────────────────
 CHQ_PENDING = "Pending"
@@ -46,502 +59,228 @@ BLACK_PEPPER_GOODS = [
 ]
 GOODS_OPTIONS = ARECA_NUT_GOODS + BLACK_PEPPER_GOODS
 
-DB_PATH = "spices.db"
+
+class _PgConn:
+    """
+    Thin wrapper around a psycopg2 connection that adds a conn.execute()
+    method matching sqlite3's API, so the rest of the app needs minimal changes.
+
+    Each call to .execute() creates a fresh cursor, executes the query,
+    and returns that cursor (which has .fetchone() / .fetchall()).
+    Rows are returned as RealDictRow objects (dict-like, accessed by column name).
+    """
+
+    def __init__(self, pg_conn, pool=None):
+        self._conn = pg_conn
+        self._pool = pool  # if set, close() returns conn to pool instead of closing
+        self._closed = False
+
+    def execute(self, sql, params=None):
+        cur = self._conn.cursor()  # RealDictCursor (set at connection level)
+        cur.execute(sql, params or ())
+        return cur
+
+    def cursor(self):
+        """Plain (non-dict) cursor — used by pandas.read_sql."""
+        import psycopg2.extensions
+        return self._conn.cursor(cursor_factory=psycopg2.extensions.cursor)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        """Return connection to pool (if pooled) or close it. Safe to call multiple times."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._pool is not None:
+            self._pool.putconn(self._conn)
+        else:
+            self._conn.close()
+
+    @property
+    def raw(self):
+        """Underlying psycopg2 connection — for advanced use."""
+        return self._conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type:
+            self.rollback()
+        else:
+            self.commit()
+        self.close()
 
 
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+def _get_db_url():
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        try:
+            import streamlit as st
+            url = st.secrets.get("DATABASE_URL")
+        except Exception:
+            pass
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL is not set. Add it to .env or .streamlit/secrets.toml"
+        )
+    return url
+
+
+# ── Connection pool (reused across Streamlit reruns) ──────────
+_pool: psycopg2.pool.ThreadedConnectionPool | None = None
+_pool_lock = threading.Lock()
+
+# ── Schema initialization flag ─────────────────────────────────
+_schema_initialized = False
+
+
+def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                _pool = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=1,
+                    maxconn=10,
+                    dsn=_get_db_url(),
+                    cursor_factory=psycopg2.extras.RealDictCursor,
+                )
+    return _pool
+
+
+def get_conn() -> _PgConn:
+    """Open a new PostgreSQL connection wrapped in _PgConn."""
+    pool = _get_pool()
+    pg_conn = pool.getconn()
+    pg_conn.autocommit = False
+    return _PgConn(pg_conn, pool=pool)
+
+
+def pg_read_sql(sql, conn, params=None):
+    """
+    Replacement for pd.read_sql() that works with psycopg2 RealDictCursor.
+    Use this everywhere instead of pd.read_sql(sql, conn).
+    """
+    cur = conn.execute(sql, params) if params else conn.execute(sql)
+    rows = cur.fetchall()
+    if not rows:
+        cols = [d[0] for d in cur.description] if cur.description else []
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame([dict(r) for r in rows])
 
 
 def ensure_schema(conn=None):
+    """
+    Seeds reference/initial data on first startup.
+    The actual DDL schema lives in Supabase (created via SQL Editor).
+    Runs only once per process — subsequent calls return immediately.
+    """
+    global _schema_initialized
+    if _schema_initialized:
+        return
+    _schema_initialized = True
+
     _own = conn is None
     if _own:
         conn = get_conn()
     try:
-        cur = conn.cursor()
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS brokers (
-            broker_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            broker_name TEXT NOT NULL UNIQUE)''')
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS customer_transactions (
-            transaction_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-            broker_id       INTEGER,
-            customer_name   TEXT NOT NULL,
-            date            TEXT NOT NULL,
-            type_of_goods   TEXT,
-            bags            INTEGER DEFAULT 0,
-            quantity        REAL    DEFAULT 0,
-            rate            REAL    DEFAULT 0,
-            total_amount    REAL    DEFAULT 0,
-            payment_status  TEXT    DEFAULT "Pending",
-            payment_method  TEXT    DEFAULT "Cash",
-            interest_rate_pct  REAL    DEFAULT 0,
-            discount_pct       REAL    DEFAULT 0,
-            discount_amount    REAL    DEFAULT 0,
-            brokerage_applied  INTEGER DEFAULT 0,
-            brokerage_amount   REAL    DEFAULT 0,
-            final_settlement   REAL    DEFAULT NULL,
-            calc_status        TEXT    DEFAULT "Pending",
-            brokerage_paid     TEXT    DEFAULT "Unpaid",
-            FOREIGN KEY (broker_id) REFERENCES brokers (broker_id))''')
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS transaction_items (
-            item_id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            transaction_id    INTEGER NOT NULL,
-            type_of_goods     TEXT,
-            bags              INTEGER DEFAULT 0,
-            bag_rate          REAL    DEFAULT 0,
-            quantity          REAL    DEFAULT 0,
-            rate              REAL    DEFAULT 0,
-            freight           REAL    DEFAULT 0,
-            collection_point  TEXT    DEFAULT "",
-            line_total        REAL    DEFAULT 0,
-            FOREIGN KEY (transaction_id)
-                REFERENCES customer_transactions(transaction_id) ON DELETE CASCADE)''')
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS payments (
-            payment_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            transaction_id  INTEGER NOT NULL,
-            payment_date    TEXT    NOT NULL,
-            amount          REAL    NOT NULL,
-            method          TEXT    DEFAULT "Cash",
-            note            TEXT    DEFAULT "",
-            days_from_start INTEGER DEFAULT 0,
-            interest_charged REAL   DEFAULT 0,
-            FOREIGN KEY (transaction_id)
-                REFERENCES customer_transactions(transaction_id) ON DELETE CASCADE)''')
-
-        # ── migrate customer_transactions
-        cur.execute("PRAGMA table_info(customer_transactions)")
-        existing_ct = {c[1] for c in cur.fetchall()}
-        for col, sql in {
-            "bags":              "ALTER TABLE customer_transactions ADD COLUMN bags INTEGER DEFAULT 0",
-            "quantity":          "ALTER TABLE customer_transactions ADD COLUMN quantity REAL DEFAULT 0",
-            "rate":              "ALTER TABLE customer_transactions ADD COLUMN rate REAL DEFAULT 0",
-            "interest_rate_pct": "ALTER TABLE customer_transactions ADD COLUMN interest_rate_pct REAL DEFAULT 0",
-            "discount_pct":      "ALTER TABLE customer_transactions ADD COLUMN discount_pct REAL DEFAULT 0",
-            "discount_amount":   "ALTER TABLE customer_transactions ADD COLUMN discount_amount REAL DEFAULT 0",
-            "brokerage_applied": "ALTER TABLE customer_transactions ADD COLUMN brokerage_applied INTEGER DEFAULT 0",
-            "brokerage_amount":  "ALTER TABLE customer_transactions ADD COLUMN brokerage_amount REAL DEFAULT 0",
-            "final_settlement":  "ALTER TABLE customer_transactions ADD COLUMN final_settlement REAL DEFAULT NULL",
-            "calc_status":       "ALTER TABLE customer_transactions ADD COLUMN calc_status TEXT DEFAULT 'Pending'",
-            "brokerage_paid":    "ALTER TABLE customer_transactions ADD COLUMN brokerage_paid TEXT DEFAULT 'Unpaid'",
-            "payment_received":  "ALTER TABLE customer_transactions ADD COLUMN payment_received REAL DEFAULT 0",
-            "grace_days":        "ALTER TABLE customer_transactions ADD COLUMN grace_days INTEGER DEFAULT 0",
-            "days_overdue":      "ALTER TABLE customer_transactions ADD COLUMN days_overdue INTEGER DEFAULT 0",
-            "interest_amount":   "ALTER TABLE customer_transactions ADD COLUMN interest_amount REAL DEFAULT 0",
-            "bill_sent":         "ALTER TABLE customer_transactions ADD COLUMN bill_sent REAL DEFAULT NULL",
-        }.items():
-            if col not in existing_ct:
-                cur.execute(sql)
-
-        # ── migrate customer_transactions — cheque + passbook fields
-        for col, sql in {
-            "cheque_number": "ALTER TABLE customer_transactions ADD COLUMN cheque_number TEXT DEFAULT NULL",
-            "cheque_date":   "ALTER TABLE customer_transactions ADD COLUMN cheque_date   TEXT DEFAULT NULL",
-            "deposit_firm":  "ALTER TABLE customer_transactions ADD COLUMN deposit_firm  TEXT DEFAULT NULL",
-        }.items():
-            if col not in existing_ct:
-                cur.execute(sql)
-
-        # ── migrate payments — cheque + passbook fields
-        cur.execute("PRAGMA table_info(payments)")
-        existing_pmts = {c[1] for c in cur.fetchall()}
-        for col, sql in {
-            "cheque_number": "ALTER TABLE payments ADD COLUMN cheque_number TEXT DEFAULT NULL",
-            "cheque_date":   "ALTER TABLE payments ADD COLUMN cheque_date   TEXT DEFAULT NULL",
-            "deposit_firm":  "ALTER TABLE payments ADD COLUMN deposit_firm  TEXT DEFAULT NULL",
-        }.items():
-            if col not in existing_pmts:
-                cur.execute(sql)
-
-        # ── migrate transaction_items
-        cur.execute("PRAGMA table_info(transaction_items)")
-        existing_ti = {c[1] for c in cur.fetchall()}
-        for col, sql in {
-            "freight":          "ALTER TABLE transaction_items ADD COLUMN freight REAL DEFAULT 0",
-            "collection_point": "ALTER TABLE transaction_items ADD COLUMN collection_point TEXT DEFAULT ''",
-        }.items():
-            if col not in existing_ti:
-                cur.execute(sql)
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS audit_log (
-            log_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts         TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
-            table_name TEXT    NOT NULL,
-            record_id  INTEGER NOT NULL,
-            action     TEXT    NOT NULL,
-            old_value  TEXT,
-            new_value  TEXT)''')
-
-        # ── Stock Register tables ──────────────────────────────
-        cur.execute('''CREATE TABLE IF NOT EXISTS stock_categories (
-            category_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            category_name TEXT NOT NULL UNIQUE)''')
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS stock_goods (
-            good_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-            category_id INTEGER NOT NULL,
-            good_name   TEXT NOT NULL,
-            UNIQUE(category_id, good_name),
-            FOREIGN KEY (category_id) REFERENCES stock_categories(category_id))''')
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS stock_levels (
-            level_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-            good_id     INTEGER NOT NULL,
-            location    TEXT NOT NULL,
-            bags        INTEGER DEFAULT 0,
-            quantity_kg REAL    DEFAULT 0,
-            UNIQUE(good_id, location),
-            FOREIGN KEY (good_id) REFERENCES stock_goods(good_id))''')
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS stock_transfers (
-            transfer_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            transfer_date TEXT NOT NULL,
-            good_id       INTEGER NOT NULL,
-            from_location TEXT,
-            to_location   TEXT,
-            bags_moved    INTEGER DEFAULT 0,
-            kg_moved      REAL    DEFAULT 0,
-            note          TEXT    DEFAULT '',
-            FOREIGN KEY (good_id) REFERENCES stock_goods(good_id))''')
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS stock_history (
-            history_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-            recorded_at   TEXT NOT NULL,
-            category_name TEXT NOT NULL,
-            good_name     TEXT NOT NULL,
-            location      TEXT NOT NULL,
-            change_type   TEXT NOT NULL,
-            bags_before   REAL NOT NULL DEFAULT 0,
-            bags_after    REAL NOT NULL DEFAULT 0,
-            bags_change   REAL NOT NULL DEFAULT 0,
-            kg_before     REAL NOT NULL DEFAULT 0,
-            kg_after      REAL NOT NULL DEFAULT 0,
-            kg_change     REAL NOT NULL DEFAULT 0,
-            source        TEXT DEFAULT '')''')
-
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_stock_history_date
-            ON stock_history(recorded_at DESC)
-        """)
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS unidentified_stock (
-            unid_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-            category_id   INTEGER NOT NULL,
-            location      TEXT NOT NULL,
-            bags          REAL NOT NULL DEFAULT 0,
-            quantity_kg   REAL NOT NULL DEFAULT 0,
-            UNIQUE(category_id, location),
-            FOREIGN KEY (category_id)
-                REFERENCES stock_categories(category_id)
-        )''')
-
-        # Pre-seed stock categories and goods
+        _today_iso = _date.today().isoformat()
+        _STOCK_LOCATIONS = ["Transport", "Shop", "Anandpuri"]
         _STOCK_SEEDS = {
             "Arecanut":     ARECA_NUT_GOODS,
             "Black Pepper": BLACK_PEPPER_GOODS,
         }
-        _STOCK_LOCATIONS = ["Transport", "Shop", "Anandpuri"]
+
+        # ── Seed stock categories & goods ──────────────────────
         for cat_name, goods_list in _STOCK_SEEDS.items():
-            cur.execute(
-                "INSERT OR IGNORE INTO stock_categories (category_name) VALUES (?)", (cat_name,))
-            row = cur.execute(
-                "SELECT category_id FROM stock_categories WHERE category_name=?",
+            conn.execute(
+                "INSERT INTO stock_categories (category_name) VALUES (%s) "
+                "ON CONFLICT DO NOTHING",
+                (cat_name,))
+            row = conn.execute(
+                "SELECT category_id FROM stock_categories WHERE category_name=%s",
                 (cat_name,)).fetchone()
             if row:
+                cid = row["category_id"]
                 for g in goods_list:
-                    cur.execute(
-                        "INSERT OR IGNORE INTO stock_goods (category_id, good_name) VALUES (?,?)",
-                        (row[0], g))
+                    conn.execute(
+                        "INSERT INTO stock_goods (category_id, good_name) "
+                        "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (cid, g))
 
-        # Initialize stock_levels for every good × every location
-        for (gid,) in cur.execute("SELECT good_id FROM stock_goods").fetchall():
+        # ── Seed stock levels for every good × location ────────
+        goods = conn.execute("SELECT good_id FROM stock_goods").fetchall()
+        for r in goods:
+            gid = r["good_id"]
             for loc in _STOCK_LOCATIONS:
-                cur.execute(
-                    "INSERT OR IGNORE INTO stock_levels "
-                    "(good_id, location, bags, quantity_kg) VALUES (?,?,0,0)", (gid, loc))
+                conn.execute(
+                    "INSERT INTO stock_levels (good_id, location, bags, quantity_kg) "
+                    "VALUES (%s, %s, 0, 0) ON CONFLICT DO NOTHING",
+                    (gid, loc))
 
-        # Seed unidentified_stock for every category × location
-        cur.execute("""
-            INSERT OR IGNORE INTO unidentified_stock
-                (category_id, location, bags, quantity_kg)
+        # ── Seed unidentified_stock ────────────────────────────
+        conn.execute("""
+            INSERT INTO unidentified_stock (category_id, location, bags, quantity_kg)
             SELECT sc.category_id, loc.location, 0, 0
             FROM stock_categories sc
-            CROSS JOIN (
-                SELECT 'Transport' AS location UNION
-                SELECT 'Shop' UNION
-                SELECT 'Anandpuri'
-            ) loc
+            CROSS JOIN (VALUES ('Transport'),('Shop'),('Anandpuri')) AS loc(location)
+            ON CONFLICT DO NOTHING
         """)
 
-        # ── Vendor tables (also created by ensure_vendor_schema in Vendor Payments)
-        cur.execute('''CREATE TABLE IF NOT EXISTS vendors (
-            vendor_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-            vendor_name TEXT NOT NULL UNIQUE)''')
-        cur.execute('''CREATE TABLE IF NOT EXISTS vendor_entries (
-            entry_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-            vendor_id   INTEGER NOT NULL,
-            entry_date  TEXT    NOT NULL,
-            ledger_type TEXT    NOT NULL,
-            firm        TEXT,
-            entry_kind  TEXT    NOT NULL,
-            particulars TEXT    NOT NULL,
-            amount      REAL    NOT NULL,
-            good_id     INTEGER,
-            bags        INTEGER DEFAULT 0,
-            quantity_kg REAL    DEFAULT 0,
-            note        TEXT    DEFAULT '',
-            created_at  TEXT    DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (vendor_id) REFERENCES vendors(vendor_id),
-            FOREIGN KEY (good_id)   REFERENCES stock_goods(good_id))''')
-
-        # ── migrate vendor_entries
-        cur.execute("PRAGMA table_info(vendor_entries)")
-        _ve_cols = {r["name"] for r in cur.fetchall()}
-        if "note" not in _ve_cols:
-            cur.execute(
-                "ALTER TABLE vendor_entries ADD COLUMN note TEXT DEFAULT ''")
-
-        # ── Passbook tables ────────────────────────────────────────
-        cur.execute('''CREATE TABLE IF NOT EXISTS passbook_entries (
-            entry_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            firm          TEXT NOT NULL,
-            entry_date    TEXT NOT NULL,
-            details       TEXT NOT NULL,
-            amount        REAL NOT NULL,
-            txn_type      TEXT NOT NULL,
-            cheque_number TEXT DEFAULT NULL,
-            cheque_status TEXT DEFAULT NULL,
-            source_type   TEXT DEFAULT 'Manual',
-            source_id     INTEGER DEFAULT NULL,
-            created_at    TEXT DEFAULT CURRENT_TIMESTAMP)''')
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS passbook_opening_balance (
-            firm           TEXT PRIMARY KEY,
-            opening_amount REAL NOT NULL DEFAULT 0,
-            opening_date   TEXT NOT NULL,
-            notes          TEXT DEFAULT '')''')
-
-        _today_iso = _date.today().isoformat()
+        # ── Passbook opening balances ──────────────────────────
         for _firm in FIRMS:
-            cur.execute(
-                "INSERT OR IGNORE INTO passbook_opening_balance "
-                "(firm, opening_amount, opening_date) VALUES (?,0,?)",
+            conn.execute(
+                "INSERT INTO passbook_opening_balance "
+                "(firm, opening_amount, opening_date) VALUES (%s, 0, %s) "
+                "ON CONFLICT DO NOTHING",
                 (_firm, _today_iso))
-            _ob = cur.execute(
+            _ob = conn.execute(
                 "SELECT opening_amount, opening_date "
-                "FROM passbook_opening_balance WHERE firm=?", (_firm,)).fetchone()
-            _exists = cur.execute(
-                "SELECT 1 FROM passbook_entries WHERE firm=? AND source_type=?",
+                "FROM passbook_opening_balance WHERE firm=%s",
+                (_firm,)).fetchone()
+            _exists = conn.execute(
+                "SELECT 1 FROM passbook_entries WHERE firm=%s AND source_type=%s",
                 (_firm, SRC_OPENING)).fetchone()
             if _ob and not _exists:
-                _oa   = float(_ob[0])
+                _oa    = float(_ob["opening_amount"])
                 _otype = 'Credit' if _oa >= 0 else 'Debit'
-                cur.execute(
+                conn.execute(
                     "INSERT INTO passbook_entries "
-                    "(firm,entry_date,details,amount,txn_type,source_type) "
-                    "VALUES (?,?,'Opening Balance',?,?,?)",
-                    (_firm, _ob[1], abs(_oa), _otype, SRC_OPENING))
+                    "(firm, entry_date, details, amount, txn_type, source_type) "
+                    "VALUES (%s, %s, 'Opening Balance', %s, %s, %s)",
+                    (_firm, _ob["opening_date"], abs(_oa), _otype, SRC_OPENING))
 
-        # ── Cash in Hand tables ───────────────────────────────────
-        cur.execute('''CREATE TABLE IF NOT EXISTS cash_in_hand_entries (
-            entry_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_date    TEXT NOT NULL,
-            details       TEXT NOT NULL,
-            amount        REAL NOT NULL,
-            txn_type      TEXT NOT NULL,
-            source_type   TEXT DEFAULT 'Manual',
-            source_id     INTEGER DEFAULT NULL,
-            created_at    TEXT DEFAULT CURRENT_TIMESTAMP)''')
-
-        cur.execute('''CREATE TABLE IF NOT EXISTS cash_in_hand_opening (
-            id             INTEGER PRIMARY KEY CHECK (id = 1),
-            opening_amount REAL NOT NULL DEFAULT 0,
-            opening_date   TEXT NOT NULL,
-            notes          TEXT DEFAULT '')''')
-
-        cur.execute(
-            "INSERT OR IGNORE INTO cash_in_hand_opening "
-            "(id, opening_amount, opening_date, notes) VALUES (1, 0, ?, '')",
+        # ── Cash in Hand opening ───────────────────────────────
+        conn.execute(
+            "INSERT INTO cash_in_hand_opening (id, opening_amount, opening_date, notes) "
+            "VALUES (1, 0, %s, '') ON CONFLICT DO NOTHING",
             (_today_iso,))
-
-        # Migrate existing Opening rows to CIHOpening (idempotent)
-        cur.execute("""
-            UPDATE cash_in_hand_entries
-               SET source_type = 'CIHOpening'
-             WHERE source_type = 'Opening'
-        """)
-
-        _cih_ob = cur.execute(
-            "SELECT opening_amount, opening_date "
-            "FROM cash_in_hand_opening WHERE id=1").fetchone()
-        _cih_exists = cur.execute(
-            "SELECT 1 FROM cash_in_hand_entries WHERE source_type=?",
+        _cih_ob = conn.execute(
+            "SELECT opening_amount, opening_date FROM cash_in_hand_opening WHERE id=1"
+        ).fetchone()
+        _cih_exists = conn.execute(
+            "SELECT 1 FROM cash_in_hand_entries WHERE source_type=%s",
             (SRC_CIH_OPENING,)).fetchone()
         if _cih_ob and not _cih_exists:
-            _coa   = float(_cih_ob[0])
+            _coa   = float(_cih_ob["opening_amount"])
             _ctype = 'Credit' if _coa >= 0 else 'Debit'
-            cur.execute(
+            conn.execute(
                 "INSERT INTO cash_in_hand_entries "
-                "(entry_date,details,amount,txn_type,source_type) VALUES (?,?,?,?,?)",
-                (_cih_ob[1], 'Opening Balance', abs(_coa), _ctype, SRC_CIH_OPENING))
-
-        # Partial unique indexes — prevent duplicate auto-sync entries while
-        # allowing multiple Manual entries (source_id IS NULL)
-        cur.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_cih_source
-            ON cash_in_hand_entries(source_type, source_id)
-            WHERE source_id IS NOT NULL
-        """)
-        cur.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_pb_source
-            ON passbook_entries(source_type, source_id)
-            WHERE source_id IS NOT NULL
-        """)
-
-        # ── DB-level CHECK triggers ──────────────────────────────
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_payment_status_insert
-            BEFORE INSERT ON customer_transactions
-            FOR EACH ROW
-            WHEN NEW.payment_status NOT IN ('Pending', 'Paid', 'Partial')
-             AND NEW.payment_status IS NOT NULL
-            BEGIN
-                SELECT RAISE(ABORT,
-                    'payment_status must be Pending, Paid, or Partial');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_payment_status_update
-            BEFORE UPDATE OF payment_status ON customer_transactions
-            FOR EACH ROW
-            WHEN NEW.payment_status NOT IN ('Pending', 'Paid', 'Partial')
-             AND NEW.payment_status IS NOT NULL
-            BEGIN
-                SELECT RAISE(ABORT,
-                    'payment_status must be Pending, Paid, or Partial');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_total_amount_insert
-            BEFORE INSERT ON customer_transactions
-            FOR EACH ROW
-            WHEN NEW.total_amount < 0
-            BEGIN
-                SELECT RAISE(ABORT, 'total_amount cannot be negative');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_total_amount_update
-            BEFORE UPDATE OF total_amount ON customer_transactions
-            FOR EACH ROW
-            WHEN NEW.total_amount < 0
-            BEGIN
-                SELECT RAISE(ABORT, 'total_amount cannot be negative');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_bill_sent_insert
-            BEFORE INSERT ON customer_transactions
-            FOR EACH ROW
-            WHEN NEW.bill_sent IS NOT NULL AND NEW.bill_sent <= 0
-            BEGIN
-                SELECT RAISE(ABORT, 'bill_sent must be > 0 when set');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_bill_sent_update
-            BEFORE UPDATE OF bill_sent ON customer_transactions
-            FOR EACH ROW
-            WHEN NEW.bill_sent IS NOT NULL AND NEW.bill_sent <= 0
-            BEGIN
-                SELECT RAISE(ABORT, 'bill_sent must be > 0 when set');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_pb_txn_type_insert
-            BEFORE INSERT ON passbook_entries
-            FOR EACH ROW
-            WHEN NEW.txn_type NOT IN ('Credit', 'Debit')
-            BEGIN
-                SELECT RAISE(ABORT, 'txn_type must be Credit or Debit');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_pb_txn_type_update
-            BEFORE UPDATE OF txn_type ON passbook_entries
-            FOR EACH ROW
-            WHEN NEW.txn_type NOT IN ('Credit', 'Debit')
-            BEGIN
-                SELECT RAISE(ABORT, 'txn_type must be Credit or Debit');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_cih_txn_type_insert
-            BEFORE INSERT ON cash_in_hand_entries
-            FOR EACH ROW
-            WHEN NEW.txn_type NOT IN ('Credit', 'Debit')
-            BEGIN
-                SELECT RAISE(ABORT, 'txn_type must be Credit or Debit');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_cih_txn_type_update
-            BEFORE UPDATE OF txn_type ON cash_in_hand_entries
-            FOR EACH ROW
-            WHEN NEW.txn_type NOT IN ('Credit', 'Debit')
-            BEGIN
-                SELECT RAISE(ABORT, 'txn_type must be Credit or Debit');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_vendor_bill_amount_insert
-            BEFORE INSERT ON vendor_entries
-            FOR EACH ROW
-            WHEN NEW.entry_kind = 'Bill' AND NEW.amount >= 0
-            BEGIN
-                SELECT RAISE(ABORT,
-                    'Bill entries must have negative amount');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_vendor_bill_amount_update
-            BEFORE UPDATE OF amount ON vendor_entries
-            FOR EACH ROW
-            WHEN NEW.entry_kind = 'Bill' AND NEW.amount >= 0
-            BEGIN
-                SELECT RAISE(ABORT,
-                    'Bill entries must have negative amount');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_vendor_payment_amount_insert
-            BEFORE INSERT ON vendor_entries
-            FOR EACH ROW
-            WHEN NEW.entry_kind = 'Payment' AND NEW.amount <= 0
-            BEGIN
-                SELECT RAISE(ABORT,
-                    'Payment entries must have positive amount');
-            END
-        """)
-        cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS chk_vendor_payment_amount_update
-            BEFORE UPDATE OF amount ON vendor_entries
-            FOR EACH ROW
-            WHEN NEW.entry_kind = 'Payment' AND NEW.amount <= 0
-            BEGIN
-                SELECT RAISE(ABORT,
-                    'Payment entries must have positive amount');
-            END
-        """)
+                "(entry_date, details, amount, txn_type, source_type) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (_cih_ob["opening_date"], 'Opening Balance',
+                 abs(_coa), _ctype, SRC_CIH_OPENING))
 
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         if _own:
             conn.close()
@@ -590,10 +329,10 @@ def add_unidentified_stock(conn, category_id: int, location: str,
     conn.execute("""
         INSERT INTO unidentified_stock
             (category_id, location, bags, quantity_kg)
-        VALUES (?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s)
         ON CONFLICT(category_id, location) DO UPDATE SET
-            bags        = bags        + excluded.bags,
-            quantity_kg = quantity_kg + excluded.quantity_kg
+            bags        = unidentified_stock.bags        + excluded.bags,
+            quantity_kg = unidentified_stock.quantity_kg + excluded.quantity_kg
     """, (category_id, location,
           round(float(bags), 2),
           round(float(quantity_kg), 2)))
@@ -603,9 +342,9 @@ def reverse_unidentified_stock(conn, category_id: int, location: str,
                                 bags: float, quantity_kg: float) -> None:
     conn.execute("""
         UPDATE unidentified_stock
-           SET bags        = bags        - ?,
-               quantity_kg = quantity_kg - ?
-         WHERE category_id = ? AND location = ?
+           SET bags        = bags        - %s,
+               quantity_kg = quantity_kg - %s
+         WHERE category_id = %s AND location = %s
     """, (round(float(bags), 2),
           round(float(quantity_kg), 2),
           category_id, location))
@@ -614,7 +353,8 @@ def reverse_unidentified_stock(conn, category_id: int, location: str,
 def log_audit(conn, table_name: str, record_id: int, action: str,
               old_value: dict = None, new_value: dict = None):
     conn.execute(
-        "INSERT INTO audit_log (table_name,record_id,action,old_value,new_value) VALUES (?,?,?,?,?)",
+        "INSERT INTO audit_log (table_name, record_id, action, old_value, new_value) "
+        "VALUES (%s, %s, %s, %s, %s)",
         (table_name, record_id, action,
          json.dumps(old_value) if old_value is not None else None,
          json.dumps(new_value) if new_value is not None else None)
@@ -632,7 +372,7 @@ def log_stock_change(conn, category_name: str, good_name: str,
             (recorded_at, category_name, good_name, location,
              change_type, bags_before, bags_after, bags_change,
              kg_before, kg_after, kg_change, source)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         category_name, good_name, location, change_type,
@@ -647,7 +387,7 @@ def log_stock_change(conn, category_name: str, good_name: str,
 def purge_old_stock_history(conn) -> None:
     conn.execute("""
         DELETE FROM stock_history
-        WHERE recorded_at < datetime('now', '-30 days')
+        WHERE recorded_at < to_char(NOW() - INTERVAL '30 days', 'YYYY-MM-DD HH24:MI:SS')
     """)
 
 
@@ -657,7 +397,7 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
 
     for it in bill_items:
         good_row = conn.execute(
-            "SELECT good_id FROM stock_goods WHERE good_name=?",
+            "SELECT good_id FROM stock_goods WHERE good_name=%s",
             (it["goods"],)).fetchone()
 
         if not good_row:
@@ -665,7 +405,7 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
                 f"'{it['goods']}' not found in Stock Register — stock not updated.")
             continue
 
-        gid = good_row[0]
+        gid = good_row["good_id"]
         loc = it.get("collection_point", "")
 
         if not loc:
@@ -687,7 +427,7 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
             FROM stock_levels sl
             JOIN stock_goods sg ON sl.good_id = sg.good_id
             JOIN stock_categories sc ON sg.category_id = sc.category_id
-            WHERE sl.good_id = ? AND sl.location = ?
+            WHERE sl.good_id = %s AND sl.location = %s
         """, (gid, loc)).fetchone()
         _cs_b_bags = float(_cs_row["bags"] or 0) if _cs_row else 0
         _cs_b_kg   = float(_cs_row["quantity_kg"] or 0) if _cs_row else 0.0
@@ -695,14 +435,14 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
         _cs_good   = _cs_row["good_name"] if _cs_row else ""
 
         conn.execute(
-            "UPDATE stock_levels SET bags=bags-?, quantity_kg=quantity_kg-? "
-            "WHERE good_id=? AND location=?",
+            "UPDATE stock_levels SET bags=bags-%s, quantity_kg=quantity_kg-%s "
+            "WHERE good_id=%s AND location=%s",
             (bags_sold, kg_sold, gid, loc))
 
         conn.execute(
             "INSERT INTO stock_transfers "
-            "(transfer_date,good_id,from_location,to_location,bags_moved,kg_moved,note) "
-            "VALUES (?,?,?,'Sold',?,?,?)",
+            "(transfer_date, good_id, from_location, to_location, bags_moved, kg_moved, note) "
+            "VALUES (%s, %s, %s, 'Sold', %s, %s, %s)",
             (str(sale_date), gid, loc, bags_sold, kg_sold,
              f"Bill sale — {customer_name}"))
 
@@ -721,10 +461,11 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
 
         updated = conn.execute(
             "SELECT bags, quantity_kg FROM stock_levels "
-            "WHERE good_id=? AND location=?", (gid, loc)).fetchone()
-        if updated and (updated[0] < 0 or updated[1] < 0):
+            "WHERE good_id=%s AND location=%s", (gid, loc)).fetchone()
+        if updated and (updated["bags"] < 0 or updated["quantity_kg"] < 0):
             warnings.append(
                 f"⚠ {it['goods']} at {loc} is now below zero "
-                f"(bags: {updated[0]}, kg: {updated[1]:.1f}) — update stock register.")
+                f"(bags: {updated['bags']}, kg: {updated['quantity_kg']:.1f}) "
+                "— update stock register.")
 
     return warnings

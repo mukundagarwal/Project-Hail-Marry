@@ -5,11 +5,12 @@ Navigation: st.session_state.pb_page in ("home", "firm", "cash")
 
 import math
 import streamlit as st
-import sqlite3
+import psycopg2
 import pandas as pd
 from datetime import date, datetime
 
 from utils.db import (
+    pg_read_sql,
     get_conn, ensure_schema,
     FIRM_SP, FIRM_MT, FIRMS,
     SRC_MANUAL, SRC_VENDOR_RTGS,
@@ -26,6 +27,7 @@ from utils.passbook_helpers import (
     _firm_summary, _cih_summary,
     allocate_to_customer, _unlink_allocation,
 )
+from utils.auth import require_login
 
 st.set_page_config(
     page_title="Passbook – S P Spices",
@@ -34,6 +36,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+require_login()
 ensure_schema()
 
 st.markdown(APP_CSS, unsafe_allow_html=True)
@@ -118,7 +121,7 @@ def _get_all_customers(conn) -> list:
     rows = conn.execute(
         "SELECT DISTINCT customer_name FROM customer_transactions ORDER BY customer_name"
     ).fetchall()
-    return [r[0] for r in rows]
+    return [r["customer_name"] for r in rows]
 
 
 
@@ -365,11 +368,12 @@ elif st.session_state.pb_page == "firm":
                                 "INSERT INTO passbook_entries "
                                 "(firm,entry_date,details,amount,txn_type,"
                                 " cheque_number,cheque_status,source_type) "
-                                "VALUES (?,?,?,?,?,?,?,?)",
+                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+                                "RETURNING entry_id",
                                 (firm, str(a_date), _det,
                                  round(a_amount, 2), a_type,
                                  _chq_no, _chq_st, SRC_MANUAL))
-                            new_eid = _cur.lastrowid
+                            new_eid = _cur.fetchone()["entry_id"]
 
                             # If user chose a specific customer (not Suspense / new name),
                             # trigger the allocation cascade immediately.
@@ -405,7 +409,7 @@ elif st.session_state.pb_page == "firm":
         if st.session_state.pb_show_ob_form:
             ob_row = conn.execute(
                 "SELECT opening_amount, opening_date, notes "
-                "FROM passbook_opening_balance WHERE firm=?", (firm,)).fetchone()
+                "FROM passbook_opening_balance WHERE firm=%s", (firm,)).fetchone()
             _prev_amt  = float(ob_row["opening_amount"]) if ob_row else 0.0
             _prev_date = (date.fromisoformat(str(ob_row["opening_date"]))
                           if ob_row else date.today())
@@ -433,7 +437,7 @@ elif st.session_state.pb_page == "firm":
                     with conn:
                         conn.execute(
                             "INSERT INTO passbook_opening_balance "
-                            "(firm,opening_amount,opening_date,notes) VALUES (?,?,?,?) "
+                            "(firm,opening_amount,opening_date,notes) VALUES (%s,%s,%s,%s) "
                             "ON CONFLICT(firm) DO UPDATE SET "
                             "opening_amount=excluded.opening_amount,"
                             "opening_date=excluded.opening_date,"
@@ -441,11 +445,11 @@ elif st.session_state.pb_page == "firm":
                             (firm, _oa, str(ob_date), ob_note.strip()))
                         conn.execute(
                             "DELETE FROM passbook_entries "
-                            "WHERE firm=? AND source_type=?", (firm, SRC_OPENING))
+                            "WHERE firm=%s AND source_type=%s", (firm, SRC_OPENING))
                         conn.execute(
                             "INSERT INTO passbook_entries "
                             "(firm,entry_date,details,amount,txn_type,source_type) "
-                            "VALUES (?,?,'Opening Balance',?,?,?)",
+                            "VALUES (%s,%s,'Opening Balance',%s,%s,%s)",
                             (firm, str(ob_date), abs(_oa), _otype, SRC_OPENING))
                     st.session_state.pb_show_ob_form = False
                     st.success("Opening balance updated.")
@@ -592,16 +596,16 @@ elif st.session_state.pb_page == "firm":
                                      use_container_width=True,
                                      help="Click to mark Cleared"):
                             conn.execute(
-                                "UPDATE passbook_entries SET cheque_status=? "
-                                "WHERE entry_id=?", (CHQ_CLEARED, eid))
+                                "UPDATE passbook_entries SET cheque_status=%s "
+                                "WHERE entry_id=%s", (CHQ_CLEARED, eid))
                             conn.commit(); st.rerun()
                     elif chq_st == CHQ_CLEARED:
                         if st.button("✓ Cleared", key=f"pb_st_{eid}",
                                      use_container_width=True,
                                      help="Click to mark Pending"):
                             conn.execute(
-                                "UPDATE passbook_entries SET cheque_status=? "
-                                "WHERE entry_id=?", (CHQ_PENDING, eid))
+                                "UPDATE passbook_entries SET cheque_status=%s "
+                                "WHERE entry_id=%s", (CHQ_PENDING, eid))
                             conn.commit(); st.rerun()
                     else:
                         st.markdown(f'<div style="{_CELL};color:#3a3628">—</div>',
@@ -673,7 +677,7 @@ elif st.session_state.pb_page == "firm":
                             WHERE  ct.calc_status   != 'Calculated'
                               AND  ct.payment_status != 'Paid'
                               AND  ct.bill_sent IS NOT NULL
-                              AND  ABS(ct.bill_sent - ?) < 0.01
+                              AND  ABS(ct.bill_sent - %s) < 0.01
                             GROUP  BY ct.transaction_id
                             ORDER  BY ct.date ASC
                         """, (pb_amount,)).fetchall()
@@ -781,46 +785,46 @@ elif st.session_state.pb_page == "firm":
                                 with conn:
                                     conn.execute(
                                         "UPDATE passbook_entries "
-                                        "SET entry_date=?,amount=? WHERE entry_id=?",
+                                        "SET entry_date=%s,amount=%s WHERE entry_id=%s",
                                         (str(ne_date), round(ne_amt, 2), eid))
                                     if _a_tid:
                                         _a_tid = int(_a_tid)
                                         _pmt = conn.execute(
                                             "SELECT payment_id FROM payments "
-                                            "WHERE transaction_id=? AND note LIKE ?",
+                                            "WHERE transaction_id=%s AND note LIKE %s",
                                             (_a_tid,
                                              f"Auto-allocated from passbook #{eid}%")
                                         ).fetchone()
                                         if _pmt:
                                             _bill_d = conn.execute(
                                                 "SELECT date FROM customer_transactions "
-                                                "WHERE transaction_id=?",
+                                                "WHERE transaction_id=%s",
                                                 (_a_tid,)).fetchone()
                                             _df = days_between(
                                                 str(_bill_d[0]),
                                                 ne_date) if _bill_d else 0
                                             conn.execute(
                                                 "UPDATE payments "
-                                                "SET payment_date=?,amount=?,days_from_start=? "
-                                                "WHERE payment_id=?",
+                                                "SET payment_date=%s,amount=%s,days_from_start=%s "
+                                                "WHERE payment_id=%s",
                                                 (str(ne_date), round(ne_amt, 2),
                                                  _df, _pmt["payment_id"]))
                                         # Recompute payment_status
                                         _ta = float(conn.execute(
                                             "SELECT total_amount FROM customer_transactions "
-                                            "WHERE transaction_id=?",
-                                            (_a_tid,)).fetchone()[0])
+                                            "WHERE transaction_id=%s",
+                                            (_a_tid,)).fetchone()["total_amount"])
                                         _np = round(float(conn.execute(
-                                            "SELECT COALESCE(SUM(amount),0) FROM payments "
-                                            "WHERE transaction_id=?",
-                                            (_a_tid,)).fetchone()[0]), 2)
+                                            "SELECT COALESCE(SUM(amount),0) AS v FROM payments "
+                                            "WHERE transaction_id=%s",
+                                            (_a_tid,)).fetchone()["v"]), 2)
                                         _ns = "Partial" if _np > 0 else "Pending"
                                         conn.execute(
                                             "UPDATE customer_transactions "
-                                            "SET payment_status=?,payment_received=?,"
+                                            "SET payment_status=%s,payment_received=%s,"
                                             "calc_status='Pending',"
                                             "final_settlement=NULL,interest_amount=0 "
-                                            "WHERE transaction_id=?",
+                                            "WHERE transaction_id=%s",
                                             (_ns, _np, _a_tid))
                                 st.session_state[f"pb_edit_{eid}"] = False
                                 st.success("Entry and linked payment updated.")
@@ -874,9 +878,9 @@ elif st.session_state.pb_page == "firm":
                                     _chqst2 = ne_chq_st if _chq2 else None
                                     conn.execute(
                                         "UPDATE passbook_entries SET "
-                                        "entry_date=?,details=?,amount=?,txn_type=?,"
-                                        "cheque_number=?,cheque_status=? "
-                                        "WHERE entry_id=?",
+                                        "entry_date=%s,details=%s,amount=%s,txn_type=%s,"
+                                        "cheque_number=%s,cheque_status=%s "
+                                        "WHERE entry_id=%s",
                                         (str(ne_date), _det2, round(ne_amt, 2),
                                          ne_type, _chq2, _chqst2, eid))
                                     conn.commit()
@@ -897,7 +901,7 @@ elif st.session_state.pb_page == "firm":
                         f'<div style="background:#1e0808;border:1px solid #6a1a1a;'
                         f'border-radius:8px;padding:0.5rem 1rem;margin-bottom:0.3rem">'
                         f'<span style="color:#ff8080;font-size:0.82rem">'
-                        f'⚠️ Delete entry #{eid}?{h(_del_note)}</span></div>',
+                        f'⚠️ Delete entry #{eid}%s{h(_del_note)}</span></div>',
                         unsafe_allow_html=True)
                     dd1, dd2, _ = st.columns([0.8, 0.8, 6])
                     with dd1:
@@ -911,28 +915,28 @@ elif st.session_state.pb_page == "firm":
                                         _d_tid = int(_d_tid)
                                         _d_pmt = conn.execute(
                                             "SELECT payment_id FROM payments "
-                                            "WHERE transaction_id=? AND note LIKE ?",
+                                            "WHERE transaction_id=%s AND note LIKE %s",
                                             (_d_tid,
                                              f"Auto-allocated from passbook #{eid}%")
                                         ).fetchone()
                                         if _d_pmt:
                                             conn.execute(
-                                                "DELETE FROM payments WHERE payment_id=?",
+                                                "DELETE FROM payments WHERE payment_id=%s",
                                                 (_d_pmt["payment_id"],))
                                         _d_np = round(float(conn.execute(
-                                            "SELECT COALESCE(SUM(amount),0) FROM payments "
-                                            "WHERE transaction_id=?",
-                                            (_d_tid,)).fetchone()[0]), 2)
+                                            "SELECT COALESCE(SUM(amount),0) AS v FROM payments "
+                                            "WHERE transaction_id=%s",
+                                            (_d_tid,)).fetchone()["v"]), 2)
                                         _d_ns = "Partial" if _d_np > 0 else "Pending"
                                         conn.execute(
                                             "UPDATE customer_transactions "
-                                            "SET payment_status=?,payment_received=?,"
+                                            "SET payment_status=%s,payment_received=%s,"
                                             "calc_status='Pending',"
                                             "final_settlement=NULL,interest_amount=0 "
-                                            "WHERE transaction_id=?",
+                                            "WHERE transaction_id=%s",
                                             (_d_ns, _d_np, _d_tid))
                                 conn.execute(
-                                    "DELETE FROM passbook_entries WHERE entry_id=?",
+                                    "DELETE FROM passbook_entries WHERE entry_id=%s",
                                     (eid,))
                             st.session_state.pop(f"pb_del_{eid}", None)
                             st.rerun()
@@ -1071,7 +1075,7 @@ elif st.session_state.pb_page == "cash":
                             conn.execute(
                                 "INSERT INTO cash_in_hand_entries "
                                 "(entry_date,details,amount,txn_type,source_type) "
-                                "VALUES (?,?,?,?,?)",
+                                "VALUES (%s,%s,%s,%s,%s)",
                                 (str(ca_date), _cdet, round(ca_amount, 2),
                                  ca_type, SRC_MANUAL))
                         st.session_state.pb_show_cih_add_form = False
@@ -1118,19 +1122,19 @@ elif st.session_state.pb_page == "cash":
                     with conn:
                         conn.execute(
                             "INSERT INTO cash_in_hand_opening "
-                            "(id,opening_amount,opening_date,notes) VALUES (1,?,?,?) "
+                            "(id,opening_amount,opening_date,notes) VALUES (1,%s,%s,%s) "
                             "ON CONFLICT(id) DO UPDATE SET "
                             "opening_amount=excluded.opening_amount,"
                             "opening_date=excluded.opening_date,"
                             "notes=excluded.notes",
                             (_coa, str(cob_date), cob_note.strip()))
                         conn.execute(
-                            "DELETE FROM cash_in_hand_entries WHERE source_type=?",
+                            "DELETE FROM cash_in_hand_entries WHERE source_type=%s",
                             (SRC_CIH_OPENING,))
                         conn.execute(
                             "INSERT INTO cash_in_hand_entries "
                             "(entry_date,details,amount,txn_type,source_type) "
-                            "VALUES (?,?,?,?,?)",
+                            "VALUES (%s,%s,%s,%s,%s)",
                             (str(cob_date), 'Opening Balance',
                              abs(_coa), _cotype, SRC_CIH_OPENING))
                     st.session_state.pb_show_cih_ob_form = False
@@ -1318,8 +1322,8 @@ elif st.session_state.pb_page == "cash":
                                 with conn:
                                     conn.execute(
                                         "UPDATE cash_in_hand_entries "
-                                        "SET entry_date=?,details=?,amount=?,txn_type=? "
-                                        "WHERE entry_id=?",
+                                        "SET entry_date=%s,details=%s,amount=%s,txn_type=%s "
+                                        "WHERE entry_id=%s",
                                         (str(cne_date), _cdet2,
                                          round(cne_amt, 2), cne_type, ceid))
                                 st.session_state[f"cih_edit_{ceid}"] = False
@@ -1338,7 +1342,7 @@ elif st.session_state.pb_page == "cash":
                         f'<div style="background:#1e0808;border:1px solid #6a1a1a;'
                         f'border-radius:8px;padding:0.5rem 1rem;margin-bottom:0.3rem">'
                         f'<span style="color:#ff8080;font-size:0.82rem">'
-                        f'⚠️ Delete entry #{ceid}?</span></div>',
+                        f'⚠️ Delete entry #{ceid}%s</span></div>',
                         unsafe_allow_html=True)
                     cdd1, cdd2, _ = st.columns([0.8, 0.8, 6])
                     with cdd1:
@@ -1346,7 +1350,7 @@ elif st.session_state.pb_page == "cash":
                                      use_container_width=True):
                             with conn:
                                 conn.execute(
-                                    "DELETE FROM cash_in_hand_entries WHERE entry_id=?",
+                                    "DELETE FROM cash_in_hand_entries WHERE entry_id=%s",
                                     (ceid,))
                             st.session_state.pop(f"cih_del_{ceid}", None)
                             st.rerun()
