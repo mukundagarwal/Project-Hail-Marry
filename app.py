@@ -7,7 +7,7 @@ All feature logic lives in pages/ and shared utils live in utils/.
 import streamlit as st
 from utils.db import ensure_schema
 from utils.styles import APP_CSS, BRAND_BAR_HTML
-from utils.auth import require_login
+from utils.auth import require_login, render_logout_button
 
 st.set_page_config(
     page_title="S P Spices – Business Diary",
@@ -17,6 +17,7 @@ st.set_page_config(
 )
 
 require_login()
+render_logout_button()
 ensure_schema()
 
 st.markdown(APP_CSS, unsafe_allow_html=True)

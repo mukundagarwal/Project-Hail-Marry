@@ -27,7 +27,7 @@ from utils.db import (
 from utils.formatters import fmt_date, fmt_inr, parse_slash_amount, days_between, h
 from utils.calculator import calculate_final_settlement, line_total, _days_30_360
 from utils.styles import APP_CSS, BRAND_BAR_HTML
-from utils.auth import require_login
+from utils.auth import require_login, render_logout_button
 
 # ── Page config ────────────────────────────────────────────────
 st.set_page_config(
@@ -38,6 +38,7 @@ st.set_page_config(
 )
 
 require_login()
+render_logout_button()
 ensure_schema()
 
 st.markdown(APP_CSS, unsafe_allow_html=True)

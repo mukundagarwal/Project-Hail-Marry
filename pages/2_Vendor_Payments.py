@@ -18,7 +18,7 @@ from utils.db import (
                       log_stock_change, add_unidentified_stock, reverse_unidentified_stock)
 from utils.styles import APP_CSS, BRAND_BAR_HTML
 from utils.formatters import fmt_inr, fmt_date, h, parse_slash_amount
-from utils.auth import require_login
+from utils.auth import require_login, render_logout_button
 
 # ── Page config ─────────────────────────────────────────────────
 st.set_page_config(
@@ -28,6 +28,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 require_login()
+render_logout_button()
 st.markdown(APP_CSS, unsafe_allow_html=True)
 st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
 

@@ -11,7 +11,7 @@ from datetime import date
 from utils.db import get_conn, pg_read_sql, ensure_schema, log_stock_change, purge_old_stock_history
 from utils.styles import APP_CSS, BRAND_BAR_HTML
 from utils.formatters import h, fmt_inr
-from utils.auth import require_login
+from utils.auth import require_login, render_logout_button
 
 LOCATIONS = ["Transport", "Shop", "Anandpuri"]
 
@@ -30,6 +30,7 @@ st.set_page_config(
 )
 
 require_login()
+render_logout_button()
 st.markdown(APP_CSS, unsafe_allow_html=True)
 st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
 

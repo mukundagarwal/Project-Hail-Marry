@@ -175,6 +175,15 @@ def pg_read_sql(sql, conn, params=None):
     return pd.DataFrame([dict(r) for r in rows])
 
 
+def invalidate_lookup_cache():
+    """Call after adding/deleting brokers, vendors, or stock goods to bust stale caches."""
+    try:
+        import streamlit as st
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+
 def ensure_schema(conn=None):
     """
     Seeds reference/initial data on first startup.

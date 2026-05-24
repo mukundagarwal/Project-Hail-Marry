@@ -1,12 +1,21 @@
 """
 Authentication gate — call require_login() at the top of every page.
-Stores authenticated state in st.session_state for the session duration.
+Call render_logout_button() in the sidebar to show a sign-out control.
+
+Password is read from st.secrets["APP_PASSWORD_HASH"] (a bcrypt hash).
+Generate a new hash with: python -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())"
 """
 
-import hashlib
+import time
+import bcrypt
 import streamlit as st
 
-_PASSWORD_HASH = hashlib.sha256("Mukund@2806".encode()).hexdigest()
+# ── Brute-force lockout config ──────────────────────────────────
+_MAX_ATTEMPTS  = 5
+_LOCKOUT_SECS  = 15 * 60   # 15 minutes
+
+# ── Session expiry ──────────────────────────────────────────────
+_SESSION_TTL   = 8 * 60 * 60  # 8 hours
 
 _LOGIN_CSS = """
 <style>
@@ -116,11 +125,59 @@ section[data-testid="stMain"] {
 """
 
 
+def _get_password_hash() -> bytes:
+    """Read bcrypt hash from st.secrets or APP_PASSWORD_HASH env var."""
+    import os
+    try:
+        val = st.secrets.get("APP_PASSWORD_HASH")
+        if val:
+            return val.encode() if isinstance(val, str) else val
+    except Exception:
+        pass
+    val = os.environ.get("APP_PASSWORD_HASH", "")
+    if not val:
+        raise RuntimeError(
+            "APP_PASSWORD_HASH is not set. Add it to .streamlit/secrets.toml or .env.\n"
+            "Generate one with: python -c \"import bcrypt; "
+            "print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())\""
+        )
+    return val.encode()
+
+
+def _is_locked_out() -> tuple[bool, int]:
+    """Returns (is_locked, seconds_remaining)."""
+    attempts  = st.session_state.get("_auth_attempts", 0)
+    locked_at = st.session_state.get("_auth_locked_at", 0)
+    if attempts >= _MAX_ATTEMPTS and locked_at:
+        elapsed   = time.time() - locked_at
+        remaining = int(_LOCKOUT_SECS - elapsed)
+        if remaining > 0:
+            return True, remaining
+        # lockout expired — reset
+        st.session_state._auth_attempts  = 0
+        st.session_state._auth_locked_at = 0
+    return False, 0
+
+
+def _check_session_expiry() -> None:
+    """Clear auth if the session has been idle too long."""
+    if not st.session_state.get("authenticated"):
+        return
+    login_time = st.session_state.get("_auth_login_time", 0)
+    if time.time() - login_time > _SESSION_TTL:
+        st.session_state.authenticated  = False
+        st.session_state._auth_login_time = 0
+        st.info("Your session has expired. Please sign in again.")
+        st.rerun()
+
+
 def require_login() -> None:
     """
     Call immediately after st.set_page_config() on every page.
     Shows the login screen and calls st.stop() until the user authenticates.
     """
+    _check_session_expiry()
+
     if st.session_state.get("authenticated"):
         return
 
@@ -129,7 +186,6 @@ def require_login() -> None:
     _, col, _ = st.columns([1, 1.1, 1])
 
     with col:
-        # ── Card top ──────────────────────────────────────────────
         st.markdown("""
         <div class="auth-card">
           <div class="auth-orb">🌶️</div>
@@ -140,7 +196,16 @@ def require_login() -> None:
         </div>
         """, unsafe_allow_html=True)
 
-        # ── Password input ────────────────────────────────────────
+        locked, remaining = _is_locked_out()
+        if locked:
+            mins = remaining // 60
+            secs = remaining % 60
+            st.error(
+                f"Too many failed attempts. Try again in {mins}m {secs}s.",
+                icon="🔒",
+            )
+            st.stop()
+
         pwd = st.text_input(
             "Password",
             type="password",
@@ -149,18 +214,45 @@ def require_login() -> None:
             key="_auth_pwd",
         )
 
-        # ── Sign in button ────────────────────────────────────────
         if st.button("Sign In →", use_container_width=True, key="_auth_btn"):
-            if hashlib.sha256(pwd.encode()).hexdigest() == _PASSWORD_HASH:
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Incorrect password — please try again.")
+            try:
+                stored_hash = _get_password_hash()
+                if bcrypt.checkpw(pwd.encode(), stored_hash):
+                    st.session_state.authenticated    = True
+                    st.session_state._auth_attempts   = 0
+                    st.session_state._auth_locked_at  = 0
+                    st.session_state._auth_login_time = time.time()
+                    st.rerun()
+                else:
+                    attempts = st.session_state.get("_auth_attempts", 0) + 1
+                    st.session_state._auth_attempts = attempts
+                    if attempts >= _MAX_ATTEMPTS:
+                        st.session_state._auth_locked_at = time.time()
+                        st.error(
+                            f"Too many failed attempts. Locked for {_LOCKOUT_SECS // 60} minutes.",
+                            icon="🔒",
+                        )
+                    else:
+                        remaining_attempts = _MAX_ATTEMPTS - attempts
+                        st.error(
+                            f"Incorrect password. {remaining_attempts} attempt(s) remaining."
+                        )
+            except RuntimeError as e:
+                st.error(str(e))
 
-        # ── Footer ────────────────────────────────────────────────
         st.markdown(
             '<div class="auth-footer">S P Spices &nbsp;·&nbsp; Internal Use Only</div>',
             unsafe_allow_html=True,
         )
 
     st.stop()
+
+
+def render_logout_button() -> None:
+    """Render a logout button in the sidebar. Call after require_login()."""
+    with st.sidebar:
+        st.markdown("---")
+        if st.button("Sign Out", key="_logout_btn", use_container_width=True):
+            for key in ("authenticated", "_auth_login_time", "_auth_attempts", "_auth_locked_at"):
+                st.session_state.pop(key, None)
+            st.rerun()

@@ -27,7 +27,7 @@ from utils.passbook_helpers import (
     _firm_summary, _cih_summary,
     allocate_to_customer, _unlink_allocation,
 )
-from utils.auth import require_login
+from utils.auth import require_login, render_logout_button
 
 st.set_page_config(
     page_title="Passbook – S P Spices",
@@ -37,6 +37,7 @@ st.set_page_config(
 )
 
 require_login()
+render_logout_button()
 ensure_schema()
 
 st.markdown(APP_CSS, unsafe_allow_html=True)
