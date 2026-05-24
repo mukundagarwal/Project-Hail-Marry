@@ -7,7 +7,7 @@ import pandas as pd
 from datetime import date, datetime
 
 from utils.db import (
-    get_conn,
+    get_conn, _db_ph,
     SRC_ALLOCATION, SRC_MANUAL, SRC_OPENING, SRC_CIH_OPENING,
     CHQ_PENDING, CHQ_CLEARED,
 )
@@ -33,10 +33,11 @@ def compute_passbook_view(firm: str, conn=None) -> pd.DataFrame:
     _own_conn = conn is None
     if _own_conn:
         conn = get_conn()
+    ph = _db_ph(conn)
     try:
         rows = conn.execute(
-            "SELECT * FROM passbook_entries WHERE firm=%s "
-            "ORDER BY entry_date ASC, entry_id ASC",
+            f"SELECT * FROM passbook_entries WHERE firm={ph} "
+            f"ORDER BY entry_date ASC, entry_id ASC",
             (firm,)).fetchall()
     finally:
         if _own_conn:
@@ -165,22 +166,24 @@ def allocate_to_customer(conn, entry_id: int, customer_name: str,
 
     Returns {"success": bool, "target_txn_id": int|None, "message": str}
     """
+    ph = _db_ph(conn)
+
     entry = conn.execute(
-        "SELECT * FROM passbook_entries WHERE entry_id=%s", (entry_id,)).fetchone()
+        f"SELECT * FROM passbook_entries WHERE entry_id={ph}", (entry_id,)).fetchone()
     if not entry:
         return {"success": False, "target_txn_id": None, "message": "Passbook entry not found."}
 
     pb_amount = round(float(entry["amount"]), 2)
     pb_date   = str(entry["entry_date"])
 
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT ct.transaction_id,
                ct.date           AS bill_date,
                ct.total_amount,
                COALESCE(SUM(p.amount), 0) AS total_paid
         FROM   customer_transactions ct
         LEFT JOIN payments p ON p.transaction_id = ct.transaction_id
-        WHERE  ct.customer_name = %s
+        WHERE  ct.customer_name = {ph}
           AND  ct.calc_status  != 'Calculated'
           AND  ct.payment_status != 'Paid'
         GROUP  BY ct.transaction_id
@@ -217,11 +220,11 @@ def allocate_to_customer(conn, entry_id: int, customer_name: str,
     old_paid = round(float(target["total_paid"]), 2)
     d_from   = days_between(str(target["bill_date"]), date.fromisoformat(pb_date))
 
-    conn.execute("""
+    conn.execute(f"""
         INSERT INTO payments
           (transaction_id, payment_date, amount, method, note,
            days_from_start, interest_charged)
-        VALUES (%s, %s, %s, 'Bank Transfer', %s, %s, 0)
+        VALUES ({ph}, {ph}, {ph}, 'Bank Transfer', {ph}, {ph}, 0)
     """, (tid, pb_date, pb_amount,
           f"Auto-allocated from passbook #{entry_id}", d_from))
 
@@ -230,22 +233,22 @@ def allocate_to_customer(conn, entry_id: int, customer_name: str,
     # Overpayments are reconciled later during the Calculate Bill
     # settlement step. Setting 'Paid' here would skip that step.
     new_st    = "Partial" if new_total > 0 else "Pending"
-    conn.execute("""
+    conn.execute(f"""
         UPDATE customer_transactions
-        SET    payment_status   = %s,
-               payment_received = %s,
+        SET    payment_status   = {ph},
+               payment_received = {ph},
                calc_status      = 'Pending',
                final_settlement = NULL,
                interest_amount  = 0
-        WHERE  transaction_id = %s
+        WHERE  transaction_id = {ph}
     """, (new_st, new_total, tid))
 
-    conn.execute("""
+    conn.execute(f"""
         UPDATE passbook_entries
-        SET    details     = %s,
-               source_type = %s,
-               source_id   = %s
-        WHERE  entry_id = %s
+        SET    details     = {ph},
+               source_type = {ph},
+               source_id   = {ph}
+        WHERE  entry_id = {ph}
     """, (customer_name, SRC_ALLOCATION, tid, entry_id))
 
     return {"success": True, "target_txn_id": tid,
@@ -264,8 +267,10 @@ def _unlink_allocation(conn, entry_id: int) -> dict:
     - Revert the passbook entry to Suspense (source_type='Manual').
     Does NOT commit.
     """
+    ph = _db_ph(conn)
+
     entry = conn.execute(
-        "SELECT * FROM passbook_entries WHERE entry_id=%s", (entry_id,)).fetchone()
+        f"SELECT * FROM passbook_entries WHERE entry_id={ph}", (entry_id,)).fetchone()
     if not entry:
         return {"success": False, "message": "Entry not found."}
 
@@ -273,35 +278,35 @@ def _unlink_allocation(conn, entry_id: int) -> dict:
     if tid:
         tid = int(tid)
         pmt = conn.execute(
-            "SELECT payment_id FROM payments "
-            "WHERE  transaction_id = %s AND note LIKE %s",
+            f"SELECT payment_id FROM payments "
+            f"WHERE  transaction_id = {ph} AND note LIKE {ph}",
             (tid, f"Auto-allocated from passbook #{entry_id}%")).fetchone()
         if pmt:
-            conn.execute("DELETE FROM payments WHERE payment_id=%s", (pmt["payment_id"],))
+            conn.execute(f"DELETE FROM payments WHERE payment_id={ph}", (pmt["payment_id"],))
 
         txn_row = conn.execute(
-            "SELECT total_amount FROM customer_transactions WHERE transaction_id=%s",
+            f"SELECT total_amount FROM customer_transactions WHERE transaction_id={ph}",
             (tid,)).fetchone()
         if txn_row:
             new_paid = round(float(conn.execute(
-                "SELECT COALESCE(SUM(amount),0) AS total FROM payments WHERE transaction_id=%s",
+                f"SELECT COALESCE(SUM(amount),0) AS total FROM payments WHERE transaction_id={ph}",
                 (tid,)).fetchone()["total"]), 2)
             new_st = "Partial" if new_paid > 0 else "Pending"
-            conn.execute("""
+            conn.execute(f"""
                 UPDATE customer_transactions
-                SET    payment_status   = %s,
-                       payment_received = %s,
+                SET    payment_status   = {ph},
+                       payment_received = {ph},
                        calc_status      = 'Pending',
                        final_settlement = NULL,
                        interest_amount  = 0
-                WHERE  transaction_id = %s
+                WHERE  transaction_id = {ph}
             """, (new_st, new_paid, tid))
 
-    conn.execute("""
+    conn.execute(f"""
         UPDATE passbook_entries
         SET    details     = 'Suspense',
-               source_type = %s,
+               source_type = {ph},
                source_id   = NULL
-        WHERE  entry_id = %s
+        WHERE  entry_id = {ph}
     """, (SRC_MANUAL, entry_id))
     return {"success": True, "message": "Entry unlinked and reverted to Suspense."}

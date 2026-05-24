@@ -227,20 +227,174 @@ def invalidate_lookup_cache():
             pass
 
 
+def _db_ph(conn) -> str:
+    """Return SQL placeholder for this connection: '?' for SQLite, '%s' for PostgreSQL."""
+    import sqlite3 as _sqlite3
+    return "?" if isinstance(conn, _sqlite3.Connection) else "%s"
+
+
+def _sqlite_ddl(conn):
+    """Create all tables in a SQLite connection. Used by tests only."""
+    stmts = [
+        """CREATE TABLE IF NOT EXISTS brokers (
+            broker_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            broker_name TEXT UNIQUE NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS customer_transactions (
+            transaction_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            broker_id         INTEGER NOT NULL REFERENCES brokers(broker_id),
+            customer_name     TEXT NOT NULL,
+            date              TEXT NOT NULL,
+            total_amount      REAL NOT NULL DEFAULT 0,
+            payment_status    TEXT NOT NULL DEFAULT 'Pending',
+            payment_received  REAL NOT NULL DEFAULT 0,
+            discount_pct      REAL NOT NULL DEFAULT 0,
+            brokerage_applied INTEGER NOT NULL DEFAULT 0,
+            calc_status       TEXT NOT NULL DEFAULT 'Pending',
+            final_settlement  REAL,
+            interest_amount   REAL NOT NULL DEFAULT 0
+        )""",
+        """CREATE TABLE IF NOT EXISTS payments (
+            payment_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id   INTEGER NOT NULL REFERENCES customer_transactions(transaction_id),
+            payment_date     TEXT NOT NULL,
+            amount           REAL NOT NULL,
+            method           TEXT NOT NULL DEFAULT 'Cash',
+            note             TEXT,
+            days_from_start  INTEGER NOT NULL DEFAULT 0,
+            interest_charged REAL NOT NULL DEFAULT 0
+        )""",
+        """CREATE TABLE IF NOT EXISTS vendors (
+            vendor_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            vendor_name TEXT UNIQUE NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS vendor_entries (
+            entry_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            vendor_id   INTEGER NOT NULL REFERENCES vendors(vendor_id),
+            entry_date  TEXT NOT NULL,
+            ledger_type TEXT NOT NULL,
+            firm        TEXT,
+            entry_kind  TEXT NOT NULL,
+            particulars TEXT,
+            amount      REAL NOT NULL DEFAULT 0,
+            bags        REAL,
+            quantity_kg REAL,
+            good_id     INTEGER
+        )""",
+        """CREATE TABLE IF NOT EXISTS passbook_entries (
+            entry_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            firm          TEXT NOT NULL,
+            entry_date    TEXT NOT NULL,
+            details       TEXT,
+            amount        REAL NOT NULL DEFAULT 0,
+            txn_type      TEXT NOT NULL,
+            cheque_status TEXT,
+            source_type   TEXT NOT NULL DEFAULT 'Manual',
+            source_id     INTEGER
+        )""",
+        """CREATE TABLE IF NOT EXISTS passbook_opening_balance (
+            firm           TEXT PRIMARY KEY,
+            opening_amount REAL NOT NULL DEFAULT 0,
+            opening_date   TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS cash_in_hand_entries (
+            entry_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_date  TEXT NOT NULL,
+            details     TEXT,
+            amount      REAL NOT NULL DEFAULT 0,
+            txn_type    TEXT NOT NULL,
+            source_type TEXT NOT NULL DEFAULT 'Manual',
+            source_id   INTEGER,
+            UNIQUE (source_type, source_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS cash_in_hand_opening (
+            id             INTEGER PRIMARY KEY,
+            opening_amount REAL NOT NULL DEFAULT 0,
+            opening_date   TEXT NOT NULL,
+            notes          TEXT NOT NULL DEFAULT ''
+        )""",
+        """CREATE TABLE IF NOT EXISTS stock_categories (
+            category_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            category_name TEXT UNIQUE NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS stock_goods (
+            good_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            category_id INTEGER NOT NULL REFERENCES stock_categories(category_id),
+            good_name   TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS stock_levels (
+            good_id     INTEGER NOT NULL REFERENCES stock_goods(good_id),
+            location    TEXT NOT NULL,
+            bags        REAL NOT NULL DEFAULT 0,
+            quantity_kg REAL NOT NULL DEFAULT 0,
+            UNIQUE (good_id, location)
+        )""",
+        """CREATE TABLE IF NOT EXISTS unidentified_stock (
+            category_id INTEGER NOT NULL REFERENCES stock_categories(category_id),
+            location    TEXT NOT NULL,
+            bags        REAL NOT NULL DEFAULT 0,
+            quantity_kg REAL NOT NULL DEFAULT 0,
+            UNIQUE (category_id, location)
+        )""",
+        """CREATE TABLE IF NOT EXISTS stock_transfers (
+            transfer_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            transfer_date TEXT NOT NULL,
+            good_id       INTEGER,
+            from_location TEXT,
+            to_location   TEXT,
+            bags_moved    REAL NOT NULL DEFAULT 0,
+            kg_moved      REAL NOT NULL DEFAULT 0,
+            note          TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS stock_history (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            recorded_at   TEXT NOT NULL,
+            category_name TEXT,
+            good_name     TEXT,
+            location      TEXT,
+            change_type   TEXT,
+            bags_before   REAL,
+            bags_after    REAL,
+            bags_change   REAL,
+            kg_before     REAL,
+            kg_after      REAL,
+            kg_change     REAL,
+            source        TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS audit_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            table_name TEXT,
+            record_id  INTEGER,
+            action     TEXT,
+            old_value  TEXT,
+            new_value  TEXT,
+            changed_at TEXT DEFAULT (datetime('now'))
+        )""",
+    ]
+    for stmt in stmts:
+        conn.execute(stmt)
+    conn.commit()
+
+
 def ensure_schema(conn=None):
     """
     Seeds reference/initial data on first startup.
-    The actual DDL schema lives in Supabase (created via SQL Editor).
-    Runs only once per process — subsequent calls return immediately.
+    Production: DDL lives in Supabase; this only seeds initial rows (runs once per process).
+    Tests: pass a sqlite3.Connection explicitly — tables are created, then seeded, every call.
     """
     global _schema_initialized
-    if _schema_initialized:
-        return
-    _schema_initialized = True
 
     _own = conn is None
     if _own:
+        # Production path — guard against running twice in the same process
+        if _schema_initialized:
+            return
         conn = get_conn()
+
+    import sqlite3 as _sqlite3
+    _is_sqlite = isinstance(conn, _sqlite3.Connection)
+    ph = "?" if _is_sqlite else "%s"
+
     try:
         _today_iso = _date.today().isoformat()
         _STOCK_LOCATIONS = ["Transport", "Shop", "Anandpuri"]
@@ -249,21 +403,25 @@ def ensure_schema(conn=None):
             "Black Pepper": BLACK_PEPPER_GOODS,
         }
 
+        # SQLite (tests): create tables since Supabase DDL isn't available
+        if _is_sqlite:
+            _sqlite_ddl(conn)
+
         # ── Seed stock categories & goods ──────────────────────
         for cat_name, goods_list in _STOCK_SEEDS.items():
             conn.execute(
-                "INSERT INTO stock_categories (category_name) VALUES (%s) "
-                "ON CONFLICT DO NOTHING",
+                f"INSERT INTO stock_categories (category_name) VALUES ({ph}) "
+                f"ON CONFLICT DO NOTHING",
                 (cat_name,))
             row = conn.execute(
-                "SELECT category_id FROM stock_categories WHERE category_name=%s",
+                f"SELECT category_id FROM stock_categories WHERE category_name={ph}",
                 (cat_name,)).fetchone()
             if row:
                 cid = row["category_id"]
                 for g in goods_list:
                     conn.execute(
-                        "INSERT INTO stock_goods (category_id, good_name) "
-                        "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        f"INSERT INTO stock_goods (category_id, good_name) "
+                        f"VALUES ({ph}, {ph}) ON CONFLICT DO NOTHING",
                         (cid, g))
 
         # ── Seed stock levels for every good × location ────────
@@ -272,64 +430,66 @@ def ensure_schema(conn=None):
             gid = r["good_id"]
             for loc in _STOCK_LOCATIONS:
                 conn.execute(
-                    "INSERT INTO stock_levels (good_id, location, bags, quantity_kg) "
-                    "VALUES (%s, %s, 0, 0) ON CONFLICT DO NOTHING",
+                    f"INSERT INTO stock_levels (good_id, location, bags, quantity_kg) "
+                    f"VALUES ({ph}, {ph}, 0, 0) ON CONFLICT DO NOTHING",
                     (gid, loc))
 
         # ── Seed unidentified_stock ────────────────────────────
-        conn.execute("""
-            INSERT INTO unidentified_stock (category_id, location, bags, quantity_kg)
-            SELECT sc.category_id, loc.location, 0, 0
-            FROM stock_categories sc
-            CROSS JOIN (VALUES ('Transport'),('Shop'),('Anandpuri')) AS loc(location)
-            ON CONFLICT DO NOTHING
-        """)
+        for _cr in conn.execute("SELECT category_id FROM stock_categories").fetchall():
+            for _loc in _STOCK_LOCATIONS:
+                conn.execute(
+                    f"INSERT INTO unidentified_stock "
+                    f"(category_id, location, bags, quantity_kg) VALUES ({ph},{ph},0,0) "
+                    f"ON CONFLICT DO NOTHING",
+                    (_cr["category_id"], _loc))
 
         # ── Passbook opening balances ──────────────────────────
         for _firm in FIRMS:
             conn.execute(
-                "INSERT INTO passbook_opening_balance "
-                "(firm, opening_amount, opening_date) VALUES (%s, 0, %s) "
-                "ON CONFLICT DO NOTHING",
+                f"INSERT INTO passbook_opening_balance "
+                f"(firm, opening_amount, opening_date) VALUES ({ph}, 0, {ph}) "
+                f"ON CONFLICT DO NOTHING",
                 (_firm, _today_iso))
             _ob = conn.execute(
-                "SELECT opening_amount, opening_date "
-                "FROM passbook_opening_balance WHERE firm=%s",
+                f"SELECT opening_amount, opening_date "
+                f"FROM passbook_opening_balance WHERE firm={ph}",
                 (_firm,)).fetchone()
             _exists = conn.execute(
-                "SELECT 1 FROM passbook_entries WHERE firm=%s AND source_type=%s",
+                f"SELECT 1 FROM passbook_entries WHERE firm={ph} AND source_type={ph}",
                 (_firm, SRC_OPENING)).fetchone()
             if _ob and not _exists:
                 _oa    = float(_ob["opening_amount"])
                 _otype = 'Credit' if _oa >= 0 else 'Debit'
                 conn.execute(
-                    "INSERT INTO passbook_entries "
-                    "(firm, entry_date, details, amount, txn_type, source_type) "
-                    "VALUES (%s, %s, 'Opening Balance', %s, %s, %s)",
+                    f"INSERT INTO passbook_entries "
+                    f"(firm, entry_date, details, amount, txn_type, source_type) "
+                    f"VALUES ({ph}, {ph}, 'Opening Balance', {ph}, {ph}, {ph})",
                     (_firm, _ob["opening_date"], abs(_oa), _otype, SRC_OPENING))
 
         # ── Cash in Hand opening ───────────────────────────────
         conn.execute(
-            "INSERT INTO cash_in_hand_opening (id, opening_amount, opening_date, notes) "
-            "VALUES (1, 0, %s, '') ON CONFLICT DO NOTHING",
+            f"INSERT INTO cash_in_hand_opening (id, opening_amount, opening_date, notes) "
+            f"VALUES (1, 0, {ph}, '') ON CONFLICT DO NOTHING",
             (_today_iso,))
         _cih_ob = conn.execute(
             "SELECT opening_amount, opening_date FROM cash_in_hand_opening WHERE id=1"
         ).fetchone()
         _cih_exists = conn.execute(
-            "SELECT 1 FROM cash_in_hand_entries WHERE source_type=%s",
+            f"SELECT 1 FROM cash_in_hand_entries WHERE source_type={ph}",
             (SRC_CIH_OPENING,)).fetchone()
         if _cih_ob and not _cih_exists:
             _coa   = float(_cih_ob["opening_amount"])
             _ctype = 'Credit' if _coa >= 0 else 'Debit'
             conn.execute(
-                "INSERT INTO cash_in_hand_entries "
-                "(entry_date, details, amount, txn_type, source_type) "
-                "VALUES (%s, %s, %s, %s, %s)",
+                f"INSERT INTO cash_in_hand_entries "
+                f"(entry_date, details, amount, txn_type, source_type) "
+                f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph})",
                 (_cih_ob["opening_date"], 'Opening Balance',
                  abs(_coa), _ctype, SRC_CIH_OPENING))
 
         conn.commit()
+        if _own:
+            _schema_initialized = True
     except Exception:
         conn.rollback()
         raise

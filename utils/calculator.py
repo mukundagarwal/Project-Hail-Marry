@@ -5,7 +5,7 @@ No Streamlit imports here — pure Python only.
 
 from datetime import datetime, date, timedelta
 
-from utils.db import get_conn, INTEREST_RATE_PCT
+from utils.db import get_conn, INTEREST_RATE_PCT, _db_ph
 
 
 def _days_30_360(start: date, end: date) -> int:
@@ -49,9 +49,10 @@ def calculate_final_settlement(transaction_id: int,
     _own_conn = (conn is None)
     if _own_conn:
         conn = get_conn()
+    ph = _db_ph(conn)
     try:
         txn = conn.execute(
-            "SELECT * FROM customer_transactions WHERE transaction_id=%s",
+            f"SELECT * FROM customer_transactions WHERE transaction_id={ph}",
             (transaction_id,)
         ).fetchone()
         if txn is None:
@@ -72,7 +73,7 @@ def calculate_final_settlement(transaction_id: int,
         interest_start = start_date + timedelta(days=grace_days)
 
         pmts_rows = conn.execute(
-            "SELECT * FROM payments WHERE transaction_id=%s ORDER BY payment_date ASC",
+            f"SELECT * FROM payments WHERE transaction_id={ph} ORDER BY payment_date ASC",
             (transaction_id,)
         ).fetchall()
 
