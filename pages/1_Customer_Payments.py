@@ -183,19 +183,24 @@ if st.session_state.page == "customer":
 
     conn = get_conn()
     try:
-        n_b  = int(pg_read_sql("SELECT COUNT(*) c FROM brokers", conn).fillna(0).iloc[0]["c"])
-        n_t  = int(pg_read_sql("SELECT COUNT(*) c FROM customer_transactions", conn).fillna(0).iloc[0]["c"])
-        rev  = float(pg_read_sql("SELECT COALESCE(SUM(total_amount),0) s FROM customer_transactions", conn).fillna(0).iloc[0]["s"])
-        pend = float(pg_read_sql("""
-            SELECT COALESCE(SUM(ct.total_amount - COALESCE(p.paid, 0)), 0) s
+        _stats = pg_read_sql("""
+            SELECT
+                (SELECT COUNT(*) FROM brokers)                               AS n_b,
+                COUNT(*)                                                     AS n_t,
+                COALESCE(SUM(ct.total_amount), 0)                           AS rev,
+                COALESCE(SUM(ct.total_amount - COALESCE(p.paid, 0))
+                    FILTER (WHERE ct.payment_status IN ('Pending','Partial')),
+                    0)                                                       AS pend
             FROM customer_transactions ct
             LEFT JOIN (
                 SELECT transaction_id, SUM(amount) AS paid
-                FROM payments
-                GROUP BY transaction_id
+                FROM payments GROUP BY transaction_id
             ) p ON ct.transaction_id = p.transaction_id
-            WHERE ct.payment_status IN ('Pending', 'Partial')
-        """, conn).fillna(0).iloc[0]["s"])
+        """, conn).fillna(0)
+        n_b  = int(_stats.iloc[0]["n_b"])
+        n_t  = int(_stats.iloc[0]["n_t"])
+        rev  = float(_stats.iloc[0]["rev"])
+        pend = float(_stats.iloc[0]["pend"])
         st.markdown(f'<div class="stat-row">'
                     f'<div class="stat-pill"><span class="sp-label">Brokers</span>'
                     f'<span class="sp-value">{int(n_b)}</span><span class="sp-sub">in directory</span></div>'

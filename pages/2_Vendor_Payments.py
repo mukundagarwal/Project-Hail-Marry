@@ -917,16 +917,18 @@ if st.session_state.vp_page == "home":
     # row_factory not needed with psycopg2 RealDictCursor
 
     try:
-        n_vendors  = conn.execute("SELECT COUNT(*) AS cnt FROM vendors").fetchone()["cnt"]
-        tot_bills  = float(conn.execute(
-            "SELECT COALESCE(SUM(amount),0) AS v FROM vendor_entries WHERE amount<0"
-        ).fetchone()["v"])   # negative value
-        tot_pmts   = float(conn.execute(
-            "SELECT COALESCE(SUM(amount),0) AS v FROM vendor_entries WHERE amount>0"
-        ).fetchone()["v"])
-        net_bal    = round(float(conn.execute(
-            "SELECT COALESCE(SUM(amount),0) AS v FROM vendor_entries"
-        ).fetchone()["v"]), 2)
+        _vs = conn.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM vendors)                              AS n_vendors,
+                COALESCE(SUM(amount) FILTER (WHERE amount < 0), 0)         AS tot_bills,
+                COALESCE(SUM(amount) FILTER (WHERE amount > 0), 0)         AS tot_pmts,
+                COALESCE(SUM(amount), 0)                                   AS net_bal
+            FROM vendor_entries
+        """).fetchone()
+        n_vendors = int(_vs["n_vendors"])
+        tot_bills = float(_vs["tot_bills"])
+        tot_pmts  = float(_vs["tot_pmts"])
+        net_bal   = round(float(_vs["net_bal"]), 2)
 
         st.markdown(
             f'<div class="stat-row">'
