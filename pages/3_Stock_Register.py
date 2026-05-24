@@ -90,16 +90,19 @@ if st.session_state.stock_page == "home":
 
     conn = get_conn()
     try:
-        n_cats   = conn.execute("SELECT COUNT(*) AS cnt FROM stock_categories").fetchone()["cnt"]
-        n_goods  = conn.execute("SELECT COUNT(*) AS cnt FROM stock_goods").fetchone()["cnt"]
-        _unid_bags = float(conn.execute(
-            "SELECT COALESCE(SUM(bags),0) AS v FROM unidentified_stock").fetchone()["v"])
-        _unid_kg   = float(conn.execute(
-            "SELECT COALESCE(SUM(quantity_kg),0) AS v FROM unidentified_stock").fetchone()["v"])
-        tot_bags = float(conn.execute(
-            "SELECT COALESCE(SUM(bags),0) AS v FROM stock_levels").fetchone()["v"]) + _unid_bags
-        tot_kg   = float(conn.execute(
-            "SELECT COALESCE(SUM(quantity_kg),0) AS v FROM stock_levels").fetchone()["v"]) + _unid_kg
+        _meta = conn.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM stock_categories) AS n_cats,
+                (SELECT COUNT(*) FROM stock_goods)      AS n_goods,
+                COALESCE((SELECT SUM(bags)        FROM stock_levels),      0) +
+                COALESCE((SELECT SUM(bags)        FROM unidentified_stock),0) AS tot_bags,
+                COALESCE((SELECT SUM(quantity_kg) FROM stock_levels),      0) +
+                COALESCE((SELECT SUM(quantity_kg) FROM unidentified_stock),0) AS tot_kg
+        """).fetchone()
+        n_cats   = int(_meta["n_cats"])
+        n_goods  = int(_meta["n_goods"])
+        tot_bags = float(_meta["tot_bags"])
+        tot_kg   = float(_meta["tot_kg"])
 
         st.markdown(
             f'<div class="stat-row">'
@@ -170,55 +173,77 @@ if st.session_state.stock_page == "home":
                         except psycopg2.errors.UniqueViolation:
                             st.error(f"'{name}' already exists.")
 
-        # Category cards
+        # Category cards — fetch all data in 4 queries instead of 5×N
         cats = conn.execute(
             "SELECT category_id, category_name FROM stock_categories "
             "ORDER BY category_name").fetchall()
 
+        # Batch 1: stock_levels totals + good count per category
+        _sl_map = {}
+        for r in conn.execute("""
+            SELECT sg.category_id,
+                   COALESCE(SUM(sl.bags), 0)        AS total_bags,
+                   COALESCE(SUM(sl.quantity_kg), 0) AS total_kg,
+                   COUNT(DISTINCT sg.good_id)       AS n_goods_cat
+            FROM stock_goods sg
+            LEFT JOIN stock_levels sl ON sl.good_id = sg.good_id
+            GROUP BY sg.category_id
+        """).fetchall():
+            _sl_map[r["category_id"]] = (float(r["total_bags"]), float(r["total_kg"]), int(r["n_goods_cat"]))
+
+        # Batch 2: all unidentified_stock rows — build both category-total and per-location dicts
+        _unid_cat_map = {}   # {cat_id: [tot_bags, tot_kg]}
+        _unid_loc_map = {}   # {cat_id: {loc: [bags, kg]}}
+        for _ur in conn.execute(
+            "SELECT category_id, location, bags, quantity_kg FROM unidentified_stock"
+        ).fetchall():
+            _cid = _ur["category_id"]
+            _ul  = _ur["location"]
+            _ub  = float(_ur["bags"] or 0)
+            _uk  = float(_ur["quantity_kg"] or 0)
+            _unid_cat_map.setdefault(_cid, [0.0, 0.0])
+            _unid_cat_map[_cid][0] += _ub
+            _unid_cat_map[_cid][1] += _uk
+            _unid_loc_map.setdefault(_cid, {}).setdefault(_ul, [0.0, 0.0])
+            _unid_loc_map[_cid][_ul][0] += _ub
+            _unid_loc_map[_cid][_ul][1] += _uk
+
+        # Batch 3: per-location stock_levels totals for all categories
+        _loc_map_all = {}   # {cat_id: {loc: (bags, kg)}}
+        for r in conn.execute("""
+            SELECT sg.category_id, sl.location,
+                   COALESCE(SUM(sl.bags), 0)        AS loc_bags,
+                   COALESCE(SUM(sl.quantity_kg), 0) AS loc_kg
+            FROM stock_goods sg
+            LEFT JOIN stock_levels sl ON sl.good_id = sg.good_id
+            WHERE sl.location IS NOT NULL
+            GROUP BY sg.category_id, sl.location
+        """).fetchall():
+            _loc_map_all.setdefault(r["category_id"], {})[r["location"]] = (
+                float(r["loc_bags"]), float(r["loc_kg"]))
+
+        # Merge unidentified per-location into loc_map_all
+        for _cid, _lm in _unid_loc_map.items():
+            _loc_map_all.setdefault(_cid, {})
+            for _ul, (_ub, _uk) in {k: v for k, v in _lm.items()}.items():
+                if _ul in _loc_map_all[_cid]:
+                    _loc_map_all[_cid][_ul] = (
+                        _loc_map_all[_cid][_ul][0] + _ub,
+                        _loc_map_all[_cid][_ul][1] + _uk)
+                else:
+                    _loc_map_all[_cid][_ul] = (_ub, _uk)
+
+        # Render loop — zero DB calls per category
         for cat_row in cats:
             cat_id   = cat_row["category_id"]
             cat_name = cat_row["category_name"]
-            totals = conn.execute("""
-                SELECT COALESCE(SUM(sl.bags),0) AS total_bags,
-                       COALESCE(SUM(sl.quantity_kg),0) AS total_kg
-                FROM stock_goods sg
-                LEFT JOIN stock_levels sl ON sl.good_id = sg.good_id
-                WHERE sg.category_id = %s""", (cat_id,)).fetchone()
-            _unid_cat = conn.execute(
-                "SELECT COALESCE(SUM(bags),0) AS total_bags, "
-                "       COALESCE(SUM(quantity_kg),0) AS total_kg "
-                "FROM unidentified_stock WHERE category_id=%s",
-                (cat_id,)).fetchone()
-            total_bags_cat = float(totals["total_bags"]) + float(_unid_cat["total_bags"])
-            total_kg_cat   = float(totals["total_kg"])   + float(_unid_cat["total_kg"])
 
-            loc_rows = conn.execute("""
-                SELECT sl.location,
-                       COALESCE(SUM(sl.bags),0) AS loc_bags,
-                       COALESCE(SUM(sl.quantity_kg),0) AS loc_kg
-                FROM stock_goods sg
-                LEFT JOIN stock_levels sl ON sl.good_id = sg.good_id
-                WHERE sg.category_id = %s
-                GROUP BY sl.location""", (cat_id,)).fetchall()
-            loc_map = {r["location"]: (float(r["loc_bags"]), float(r["loc_kg"])) for r in loc_rows}
-
-            # Add unidentified stock into per-location map
-            _unid_loc_rows = conn.execute(
-                "SELECT location, bags, quantity_kg "
-                "FROM unidentified_stock WHERE category_id=%s",
-                (cat_id,)).fetchall()
-            for _ur in _unid_loc_rows:
-                _ul = _ur["location"]
-                _ub = float(_ur["bags"] or 0)
-                _uk = float(_ur["quantity_kg"] or 0)
-                if _ul in loc_map:
-                    loc_map[_ul] = (loc_map[_ul][0] + _ub, loc_map[_ul][1] + _uk)
-                else:
-                    loc_map[_ul] = (_ub, _uk)
-
-            n_goods_cat = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM stock_goods WHERE category_id=%s",
-                (cat_id,)).fetchone()["cnt"]
+            _sl            = _sl_map.get(cat_id, (0.0, 0.0, 0))
+            _unid          = _unid_cat_map.get(cat_id, [0.0, 0.0])
+            total_bags_cat = _sl[0] + _unid[0]
+            total_kg_cat   = _sl[1] + _unid[1]
+            n_goods_cat    = _sl[2]
+            loc_map        = _loc_map_all.get(cat_id, {})
 
             loc_html = "".join(
                 f'<div style="flex:1;background:{LOC_ACCENT[loc]["bg"]};'

@@ -175,13 +175,56 @@ def pg_read_sql(sql, conn, params=None):
     return pd.DataFrame([dict(r) for r in rows])
 
 
+try:
+    import streamlit as _st_mod
+    _cache_ttl_300 = _st_mod.cache_data(ttl=300, show_spinner=False)
+except Exception:
+    _cache_ttl_300 = lambda f: f  # identity — tests / non-Streamlit contexts
+
+
+@_cache_ttl_300
+def get_all_brokers_cached():
+    """Broker list cached 5 min. Call invalidate_lookup_cache() after add/delete."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT broker_id, broker_name FROM brokers ORDER BY broker_name"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_cache_ttl_300
+def get_all_vendors_cached():
+    """Vendor list cached 5 min. Call invalidate_lookup_cache() after add/delete."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT vendor_id, vendor_name FROM vendors ORDER BY vendor_name"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_cache_ttl_300
+def get_merged_goods_cached():
+    """Merged goods dict cached 5 min. Call invalidate_lookup_cache() after add/delete."""
+    conn = get_conn()
+    try:
+        return get_merged_goods(conn, ARECA_NUT_GOODS, BLACK_PEPPER_GOODS)
+    finally:
+        conn.close()
+
+
 def invalidate_lookup_cache():
     """Call after adding/deleting brokers, vendors, or stock goods to bust stale caches."""
-    try:
-        import streamlit as st
-        st.cache_data.clear()
-    except Exception:
-        pass
+    for _fn in (get_all_brokers_cached, get_all_vendors_cached, get_merged_goods_cached):
+        try:
+            _fn.clear()
+        except Exception:
+            pass
 
 
 def ensure_schema(conn=None):

@@ -14,8 +14,9 @@ import pandas as pd
 from datetime import date
 
 from utils.db import (
-    pg_read_sql,get_conn, FIRM_SP, FIRM_MT, SRC_VENDOR_RTGS, SRC_VENDOR_UB,
-                      log_stock_change, add_unidentified_stock, reverse_unidentified_stock)
+    pg_read_sql, get_conn, FIRM_SP, FIRM_MT, SRC_VENDOR_RTGS, SRC_VENDOR_UB,
+    log_stock_change, add_unidentified_stock, reverse_unidentified_stock,
+    get_all_vendors_cached, invalidate_lookup_cache)
 from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.formatters import fmt_inr, fmt_date, h, parse_slash_amount
 from utils.auth import require_login, render_logout_button
@@ -966,6 +967,7 @@ if st.session_state.vp_page == "home":
                                 "INSERT INTO vendors (vendor_id, vendor_name) VALUES (%s,%s)",
                                 (int(max_id) + 1, nm))
                             conn.commit()
+                            invalidate_lookup_cache()
                             st.success(f"Added '{nm}'")
                             st.rerun()
                         except psycopg2.errors.UniqueViolation:
@@ -973,8 +975,7 @@ if st.session_state.vp_page == "home":
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
-        df_v = pg_read_sql(
-            "SELECT vendor_id, vendor_name FROM vendors ORDER BY vendor_name", conn)
+        df_v = pd.DataFrame(get_all_vendors_cached())
         if search:
             df_v = df_v[df_v["vendor_name"].str.contains(search, case=False, na=False)]
 
@@ -1080,6 +1081,7 @@ if st.session_state.vp_page == "home":
                                             "DELETE FROM vendor_entries WHERE vendor_id=%s", (vid,))
                                         conn.execute(
                                             "DELETE FROM vendors WHERE vendor_id=%s", (vid,))
+                                    invalidate_lookup_cache()
                                     st.session_state.pop(f"vp_del_vendor_{vid}", None)
                                     st.rerun()
                             with dc2:

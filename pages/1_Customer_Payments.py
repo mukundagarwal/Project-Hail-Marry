@@ -14,7 +14,7 @@ import time
 from utils.db import (
     pg_read_sql,
     get_conn, ensure_schema, log_audit, deduct_stock_for_sale,
-    get_merged_goods,
+    get_all_brokers_cached, get_merged_goods_cached, invalidate_lookup_cache,
     INTEREST_RATE_PCT, DEFAULT_GRACE_DAYS, TXNS_PER_PAGE,
     GOODS_OPTIONS, ARECA_NUT_GOODS, BLACK_PEPPER_GOODS,
     FIRM_SP, FIRM_MT, FIRMS,
@@ -231,6 +231,7 @@ if st.session_state.page == "customer":
                             conn.execute("INSERT INTO brokers (broker_id,broker_name) VALUES (%s,%s)",
                                          (next_id, name_clean))
                             conn.commit()
+                            invalidate_lookup_cache()
                             st.success(f"Added '{name_clean}'")
                             st.rerun()
                         except psycopg2.IntegrityError:
@@ -238,7 +239,7 @@ if st.session_state.page == "customer":
                             st.error("A broker with this name already exists.")
 
         st.markdown("<hr>", unsafe_allow_html=True)
-        df_b = pg_read_sql("SELECT * FROM brokers ORDER BY broker_name ASC", conn)
+        df_b = pd.DataFrame(get_all_brokers_cached())
         if search:
             df_b = df_b[df_b["broker_name"].str.contains(search, case=False, na=False)]
 
@@ -282,7 +283,9 @@ if st.session_state.page == "customer":
                                 try:
                                     conn.execute("DELETE FROM brokers WHERE broker_id=%s",
                                                  (row["broker_id"],))
-                                    conn.commit(); st.rerun()
+                                    conn.commit()
+                                    invalidate_lookup_cache()
+                                    st.rerun()
                                 except psycopg2.IntegrityError:
                                     conn.rollback()
                                     st.error(f"Cannot delete '{row['broker_name']}' — "
@@ -421,7 +424,7 @@ elif st.session_state.page == "ledger":
                 st.markdown("##### Goods Details")
                 render_cart()
 
-                _goods_map = get_merged_goods(conn, ARECA_NUT_GOODS, BLACK_PEPPER_GOODS)
+                _goods_map = get_merged_goods_cached()
 
                 if _goods_map["__empty__"]:
                     st.warning(
