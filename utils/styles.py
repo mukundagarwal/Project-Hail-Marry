@@ -137,54 +137,210 @@ BRAND_BAR_HTML = """
 </div>
 """
 
-_LIGHT_OVERRIDES = """
-<style>
-html,body,[data-testid="stAppViewContainer"]{background:#f5f2ec!important;color:#2a2418!important}
-[data-testid="stSidebar"]{background:#edeae4!important}
-[data-testid="stSidebar"] *{color:#4a3e2a!important}
-[data-testid="stSidebar"] hr{border-color:#d5cfc4!important}
-[data-testid="stSidebar"] .stButton>button{background:#e0dbd2!important;color:#4a3e2a!important;border-color:#ccc5b8!important}
-[data-testid="stSidebar"] .stButton>button:hover{background:#8a5e12!important;color:#fff!important;border-color:#8a5e12!important}
-.brand-bar{border-bottom-color:#d5cfc4!important}
-.brand-name{color:#8a5e12!important}
-.brand-sub{color:#9a8a6e!important}
-.page-title{color:#8a5e12!important}
-.page-sub{color:#9a8a6e!important}
-.nav-card{background:#ffffff!important;border-color:#d5cfc4!important;box-shadow:0 2px 8px rgba(0,0,0,0.06)!important}
-.nav-card:hover{border-color:#8a5e12!important;box-shadow:0 6px 20px rgba(138,94,18,0.12)!important}
-.nav-card .card-num{color:#ede8df!important}
-.nav-card .card-label{color:#2a2418!important}
-.nav-card .card-desc{color:#8a7a60!important}
-.stat-pill{background:#ffffff!important;border-color:#d5cfc4!important}
-.stat-pill .sp-label{color:#9a8a6e!important}
-.stat-pill .sp-value{color:#8a5e12!important}
-.stat-pill .sp-sub{color:#b0a088!important}
-.stButton>button{background:#ede8e0!important;color:#4a3e2a!important;border-color:#d5cfc4!important}
-.stButton>button:hover{background:#8a5e12!important;color:#ffffff!important;border-color:#8a5e12!important}
-.back-btn>button{color:#9a8a6e!important}
-.back-btn>button:hover{color:#8a5e12!important;background:transparent!important}
-[data-testid="stTextInput"] input{background:#ffffff!important;border-color:#d5cfc4!important;color:#2a2418!important}
-[data-testid="stTextInput"] input:focus{border-color:#8a5e12!important;box-shadow:0 0 0 2px rgba(138,94,18,0.12)!important}
-[data-testid="stTextInput"] label{color:#9a8a6e!important}
-hr{border-color:#d5cfc4!important}
-.theme-pill{background:#ffffff;border:1px solid #d5cfc4;border-radius:12px;padding:0.45rem 0.9rem;display:flex;align-items:center;gap:0.5rem;justify-content:flex-end;box-shadow:0 1px 4px rgba(0,0,0,0.06)}
-::-webkit-scrollbar-track{background:#f0ece4!important}
-::-webkit-scrollbar-thumb{background:#d5cfc4!important}
-</style>
-"""
-
 _TOGGLE_WRAP_CSS = """
 <style>
 .theme-pill{background:#1a1814;border:1px solid #2a2820;border-radius:12px;padding:0.45rem 0.9rem;display:flex;align-items:center;gap:0.5rem;justify-content:flex-end}
-/* Align toggle vertically with brand bar */
 div[data-testid="column"]:last-child{display:flex;flex-direction:column;justify-content:center}
 </style>
 """
 
 
+def get_light_mode_css() -> str:
+    """
+    Comprehensive warm-cream light mode override.
+    Inject via st.markdown() AFTER APP_CSS on every page when light_mode is active.
+    """
+    return """
+<style>
+/* ── Core layout ── */
+html,body,
+[data-testid="stAppViewContainer"],
+[data-testid="stAppViewContainer"]>.main,
+[data-testid="stMainBlockContainer"],
+[data-testid="block-container"],
+section[data-testid="stMain"]>div,
+section[data-testid="stMain"]{background:#F5F1E8!important;color:#2C2C2C!important}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"],[data-testid="stSidebar"]>div:first-child{background:#EFE9DC!important}
+[data-testid="stSidebar"] p,[data-testid="stSidebar"] span,[data-testid="stSidebar"] div,
+[data-testid="stSidebar"] label{color:#2C2C2C!important}
+[data-testid="stSidebar"] hr{border-color:#D8D0C0!important}
+[data-testid="stSidebar"] .stButton>button{background:#E6DFD4!important;color:#3A3020!important;border-color:#D8D0C0!important}
+[data-testid="stSidebar"] .stButton>button:hover{background:#B07E28!important;color:#fff!important;border-color:#B07E28!important}
+
+/* ── Brand bar ── */
+.brand-bar{border-bottom-color:#D8D0C0!important}
+.brand-name{color:#8A5E12!important}
+.brand-sub{color:#8A7A60!important}
+
+/* ── Page headings ── */
+.page-title{color:#8A5E12!important}
+.page-sub{color:#8A7A60!important}
+
+/* ── Nav cards (dashboard) ── */
+.nav-card{background:#FFFBF7!important;border-color:#D8D0C0!important;box-shadow:0 2px 8px rgba(0,0,0,0.06)!important}
+.nav-card:hover{border-color:#B07E28!important;box-shadow:0 6px 20px rgba(176,126,40,0.12)!important;transform:translateY(-3px)!important}
+.nav-card .card-num{color:#EDE8DF!important}
+.nav-card .card-label{color:#2C2C2C!important}
+.nav-card .card-desc{color:#8A7A60!important}
+
+/* ── Stat pills ── */
+.stat-pill{background:#FFFBF7!important;border-color:#D8D0C0!important}
+.stat-pill .sp-label{color:#8A7A60!important}
+.stat-pill .sp-value{color:#8A5E12!important}
+.stat-pill .sp-sub{color:#A89880!important}
+
+/* ── Buttons ── */
+.stButton>button{background:#EDE8DC!important;color:#3A3020!important;border-color:#D8D0C0!important}
+.stButton>button:hover{background:#B07E28!important;color:#fff!important;border-color:#B07E28!important}
+.back-btn>button{color:#8A7A60!important;background:transparent!important;border:none!important}
+.back-btn>button:hover{color:#B07E28!important;background:transparent!important}
+
+/* ── Text inputs ── */
+[data-testid="stTextInput"] input{background:#FFFDF9!important;border-color:#D8D0C0!important;color:#2C2C2C!important}
+[data-testid="stTextInput"] input:focus{border-color:#B07E28!important;box-shadow:0 0 0 2px rgba(176,126,40,0.15)!important}
+[data-testid="stTextInput"] input::placeholder{color:#B0A088!important}
+[data-testid="stTextInput"] label{color:#8A7A60!important;font-size:0.78rem!important}
+
+/* ── Date input ── */
+[data-testid="stDateInput"] input,[data-testid="stDateInput"]>div>div{background:#FFFDF9!important;border-color:#D8D0C0!important;color:#2C2C2C!important}
+[data-testid="stDateInput"] label{color:#8A7A60!important}
+
+/* ── Number input ── */
+.stNumberInput>div>div>input,[data-testid="stNumberInput"] input{background:#FFFDF9!important;border-color:#D8D0C0!important;color:#2C2C2C!important}
+[data-testid="stNumberInput"] label{color:#8A7A60!important}
+[data-testid="stNumberInput"] button{background:#EDE8DC!important;border-color:#D8D0C0!important;color:#3A3020!important}
+
+/* ── Selectbox ── */
+.stSelectbox>div>div,[data-testid="stSelectbox"]>div>div{background:#FFFDF9!important;border-color:#D8D0C0!important;color:#2C2C2C!important}
+[data-testid="stSelectbox"] label{color:#8A7A60!important}
+[data-baseweb="select"]>div{background:#FFFDF9!important;border-color:#D8D0C0!important}
+[data-baseweb="select"] span{color:#2C2C2C!important}
+[data-baseweb="popover"]>div{background:#FFFBF7!important;border-color:#D8D0C0!important}
+li[role="option"]{background:#FFFBF7!important;color:#2C2C2C!important}
+li[role="option"]:hover,li[role="option"][aria-selected="true"]{background:#F0EBE0!important}
+
+/* ── Checkbox / Radio / Toggle ── */
+[data-testid="stCheckbox"] label,[data-testid="stRadio"] label,[data-testid="stToggle"] label{color:#3A3020!important}
+[data-testid="stRadio"] div{color:#3A3020!important}
+
+/* ── Expander ── */
+[data-testid="stExpander"]{background:#FFFBF7!important;border-color:#D8D0C0!important}
+[data-testid="stExpander"] summary{color:#3A3020!important}
+[data-testid="stExpander"] summary:hover{color:#B07E28!important}
+[data-testid="stExpander"]>div{background:#FFFBF7!important}
+
+/* ── Form ── */
+[data-testid="stForm"]{background:#FFFBF7!important;border-color:#D8D0C0!important}
+[data-testid="stForm"] label{color:#8A7A60!important}
+
+/* ── Popover ── */
+[data-testid="stPopover"]>div,[data-testid="stPopoverBody"]{background:#FFFBF7!important;border-color:#D8D0C0!important}
+[data-testid="stPopoverBody"] *{color:#2C2C2C!important}
+[data-testid="stPopoverBody"] .stButton>button{background:#EDE8DC!important;color:#3A3020!important;border-color:#D8D0C0!important}
+[data-testid="stPopoverBody"] .stButton>button:hover{background:#B07E28!important;color:#fff!important}
+
+/* ── Filter bar ── */
+.filter-bar{background:#F0EBE0!important;border-color:#D8D0C0!important}
+.filter-label{color:#8A7A60!important}
+
+/* ── Ledger header ── */
+.ledger-header{background:linear-gradient(135deg,#F0EBE0,#EDE6D8)!important;border-color:#D8D0C0!important}
+.lh-name{color:#8A5E12!important}
+.lh-id{color:#8A7A60!important}
+
+/* ── Cart / bill items ── */
+.cart-item{background:#FFFBF7!important;border-color:#D8D0C0!important}
+.ci-name{color:#8A5E12!important}
+.ci-detail{color:#8A7A60!important}
+.ci-total{color:#4A9444!important}
+
+/* ── Bill total box ── */
+.bill-total-box{background:#F0F5EE!important;border-color:#C8DCC4!important}
+.bt-row{color:#5A7A54!important}
+
+/* ── Items table ── */
+.items-table th{color:#8A7A60!important;border-bottom-color:#D8D0C0!important}
+.items-table td{color:#3A3020!important;border-bottom-color:#EDE8DC!important}
+.items-table .td-goods{color:#2C2C2C!important}
+.items-table .td-num{color:#8A7A60!important}
+.items-footer{border-top-color:#C8DCC4!important;color:#8A5E12!important}
+
+/* ── Timeline ── */
+.tl-card{background:#FFFBF7!important;border-color:#D8D0C0!important}
+.tl-card:hover{border-color:#B07E28!important}
+.tl-date{color:#8A7A60!important}
+.tl-label{color:#6A5A44!important}
+.tl-amount{color:#2C2C2C!important}
+.tl-days{color:#5A7A98!important;background:#E8F0FA!important}
+.tl-remaining{background:#EEF2FA!important;border-color:#C0CCDC!important}
+.tl-remaining-label{color:#7A8AAA!important}
+.tl-interest{color:#4A7AAA!important}
+
+/* ── Bill breakdown ── */
+.bill-breakdown{background:#F0F5EE!important;border-color:#C8DCC4!important}
+.bb-row{border-bottom-color:#D8EDD4!important}
+.bb-row .bb-label{color:#5A7A54!important}
+.bb-row .bb-val{color:#3A3020!important}
+.bb-row.bb-total{border-top-color:#4A9444!important}
+.bb-row.bb-total .bb-label,.bb-row.bb-total .bb-val{color:#4A9444!important}
+
+/* ── Status badges ── */
+.cs-calculated{background:#E8F5E8!important;color:#4A9444!important;border-color:#B0D8B0!important}
+.cs-pending{background:#FFF0E0!important;color:#C05A00!important;border-color:#E8C080!important}
+.badge-paid{background:#E8F5E8!important;color:#3A8034!important;border-color:#B0D8B0!important}
+.badge-pending{background:#FFF0E8!important;color:#C04800!important;border-color:#E8B080!important}
+.badge-partial{background:#E8EEF8!important;color:#3A5898!important;border-color:#B0C4E8!important}
+.badge-bp-paid{background:#E8F5E8!important;color:#3A8034!important;border-color:#B0D8B0!important}
+.badge-bp-unpaid{background:#FAE8E8!important;color:#983A3A!important;border-color:#E8B0B0!important}
+
+/* ── Detail grid ── */
+.detail-cell{background:#F5F1E8!important;border:1px solid #E0D8C8!important}
+.dc-label{color:#8A7A60!important}
+.dc-value{color:#3A3020!important}
+
+/* ── Summary panel ── */
+.sum-panel{background:#EEF0FA!important;border-color:#C4C8E0!important}
+.sum-panel-title{color:#4A5AA0!important}
+.sum-cell{background:#F5F6FC!important;border-color:#D0D4EC!important}
+.sum-cell .sc-l{color:#7A80B0!important}
+.sum-cell .sc-v{color:#4A5AA0!important}
+
+/* ── Warn / rule / info boxes ── */
+.warn-box{background:#FFF4E8!important;border-color:#E8B060!important;color:#8A4400!important}
+.warn-box strong{color:#B05800!important}
+.rule-note{background:#FFF8E8!important;border-color:#E8D080!important;color:#7A6020!important}
+.info-chip{background:#EEF0FA!important;border-color:#C4C8E0!important;color:#4A5AA0!important}
+
+/* ── Overdue alert ── */
+.overdue-alert{background:#FAE8E8!important;border-color:#E8A0A0!important;color:#C02020!important}
+.overdue-alert .oa-days{color:#A00000!important}
+
+/* ── Dividers & scrollbar ── */
+hr{border-color:#D8D0C0!important}
+::-webkit-scrollbar-track{background:#F0EBE0!important}
+::-webkit-scrollbar-thumb{background:#D8D0C0!important}
+
+/* ── Empty state ── */
+.empty-state{color:#8A7A60!important}
+
+/* ── Generic markdown text ── */
+[data-testid="stMarkdownContainer"] p,[data-testid="stMarkdownContainer"] li{color:#2C2C2C!important}
+[data-testid="stCaption"]{color:#8A7A60!important}
+
+/* ── Streamlit alerts ── */
+[data-testid="stAlert"]{background:#FFFBF7!important}
+
+/* ── Theme toggle pill ── */
+.theme-pill{background:#FFFBF7!important;border-color:#D8D0C0!important;box-shadow:0 1px 4px rgba(0,0,0,0.06)!important}
+</style>
+"""
+
+
 def get_dashboard_css(light_mode: bool = False) -> str:
-    """Return the full CSS to inject on the dashboard page."""
+    """Full CSS for the dashboard page (includes theme toggle pill styles)."""
     base = APP_CSS + _TOGGLE_WRAP_CSS
     if light_mode:
-        return base + _LIGHT_OVERRIDES
+        return base + get_light_mode_css()
     return base

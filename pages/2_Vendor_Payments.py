@@ -16,7 +16,7 @@ from datetime import date
 from utils.db import (
     pg_read_sql,get_conn, FIRM_SP, FIRM_MT, SRC_VENDOR_RTGS, SRC_VENDOR_UB,
                       log_stock_change, add_unidentified_stock, reverse_unidentified_stock)
-from utils.styles import APP_CSS, BRAND_BAR_HTML
+from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.formatters import fmt_inr, fmt_date, h, parse_slash_amount
 from utils.auth import require_login, render_logout_button
 
@@ -30,6 +30,8 @@ st.set_page_config(
 require_login()
 render_logout_button()
 st.markdown(APP_CSS, unsafe_allow_html=True)
+if st.session_state.get("light_mode"):
+    st.markdown(get_light_mode_css(), unsafe_allow_html=True)
 st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
 
 

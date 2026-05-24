@@ -26,7 +26,7 @@ from utils.db import (
 )
 from utils.formatters import fmt_date, fmt_inr, parse_slash_amount, days_between, h
 from utils.calculator import calculate_final_settlement, line_total, _days_30_360
-from utils.styles import APP_CSS, BRAND_BAR_HTML
+from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.auth import require_login, render_logout_button
 
 # ── Page config ────────────────────────────────────────────────
@@ -42,6 +42,8 @@ render_logout_button()
 ensure_schema()
 
 st.markdown(APP_CSS, unsafe_allow_html=True)
+if st.session_state.get("light_mode"):
+    st.markdown(get_light_mode_css(), unsafe_allow_html=True)
 st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
 
 # ── Session state defaults ─────────────────────────────────────

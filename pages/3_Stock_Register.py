@@ -9,7 +9,7 @@ import pandas as pd
 from datetime import date
 
 from utils.db import get_conn, pg_read_sql, ensure_schema, log_stock_change, purge_old_stock_history
-from utils.styles import APP_CSS, BRAND_BAR_HTML
+from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.formatters import h, fmt_inr
 from utils.auth import require_login, render_logout_button
 
@@ -32,6 +32,8 @@ st.set_page_config(
 require_login()
 render_logout_button()
 st.markdown(APP_CSS, unsafe_allow_html=True)
+if st.session_state.get("light_mode"):
+    st.markdown(get_light_mode_css(), unsafe_allow_html=True)
 st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
 
 

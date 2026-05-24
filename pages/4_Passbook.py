@@ -20,7 +20,7 @@ from utils.db import (
     CHQ_PENDING, CHQ_CLEARED,
     TXNS_PER_PAGE,
 )
-from utils.styles import APP_CSS, BRAND_BAR_HTML
+from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.formatters import fmt_inr, fmt_date, h, days_between
 from utils.passbook_helpers import (
     compute_passbook_view, compute_cash_view,
@@ -41,6 +41,8 @@ render_logout_button()
 ensure_schema()
 
 st.markdown(APP_CSS, unsafe_allow_html=True)
+if st.session_state.get("light_mode"):
+    st.markdown(get_light_mode_css(), unsafe_allow_html=True)
 st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
 
 # ── Session state ──────────────────────────────────────────────
