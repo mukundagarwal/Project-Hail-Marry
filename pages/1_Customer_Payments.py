@@ -241,10 +241,17 @@ if st.session_state.page == "customer":
             df_b = df_b[df_b["broker_name"].str.contains(search, case=False, na=False)]
 
         _today_str = date.today().isoformat()
-        df_ov = pg_read_sql(
-            "SELECT broker_id, COUNT(*) as overdue_count FROM customer_transactions "
-            "WHERE payment_status IN ('Pending','Partial') "
-            "AND (%s::date - date::date) > 60 GROUP BY broker_id",
+        df_ov = pg_read_sql("""
+            SELECT ct.broker_id, COUNT(*) AS overdue_count
+            FROM customer_transactions ct
+            LEFT JOIN (
+                SELECT transaction_id, SUM(amount) AS paid
+                FROM payments GROUP BY transaction_id
+            ) p ON ct.transaction_id = p.transaction_id
+            WHERE ct.payment_status IN ('Pending','Partial')
+              AND (%s::date - ct.date::date) > 60
+              AND (ct.total_amount - COALESCE(p.paid, 0)) >= 0.075 * ct.total_amount
+            GROUP BY ct.broker_id""",
             conn, params=(_today_str,))
         overdue_map = dict(zip(df_ov["broker_id"], df_ov["overdue_count"]))
 
@@ -319,15 +326,21 @@ elif st.session_state.page == "ledger":
 
         stats = pg_read_sql("""
             SELECT COUNT(*) cnt,
-                COALESCE(SUM(total_amount),0) total,
-                COALESCE(SUM(CASE WHEN payment_status='Pending' THEN total_amount ELSE 0 END),0) pending,
-                COALESCE(SUM(CASE WHEN payment_status='Paid'    THEN total_amount ELSE 0 END),0) paid,
-                COALESCE(SUM(CASE WHEN final_settlement IS NOT NULL THEN final_settlement ELSE 0 END),0) settled,
-                COALESCE(SUM(CASE WHEN calc_status='Pending' THEN 1 ELSE 0 END),0) uncalc,
-                COALESCE(SUM(CASE WHEN payment_status IN ('Pending','Partial')
-                    AND (%s::date - date::date) > 60
+                COALESCE(SUM(ct.total_amount),0) total,
+                COALESCE(SUM(CASE WHEN ct.payment_status='Pending' THEN ct.total_amount ELSE 0 END),0) pending,
+                COALESCE(SUM(CASE WHEN ct.payment_status='Paid'    THEN ct.total_amount ELSE 0 END),0) paid,
+                COALESCE(SUM(CASE WHEN ct.final_settlement IS NOT NULL THEN ct.final_settlement ELSE 0 END),0) settled,
+                COALESCE(SUM(CASE WHEN ct.calc_status='Pending' THEN 1 ELSE 0 END),0) uncalc,
+                COALESCE(SUM(CASE WHEN ct.payment_status IN ('Pending','Partial')
+                    AND (%s::date - ct.date::date) > 60
+                    AND (ct.total_amount - COALESCE(p.paid, 0)) >= 0.075 * ct.total_amount
                     THEN 1 ELSE 0 END),0) overdue_cnt
-            FROM customer_transactions WHERE broker_id=%s""",
+            FROM customer_transactions ct
+            LEFT JOIN (
+                SELECT transaction_id, SUM(amount) AS paid
+                FROM payments GROUP BY transaction_id
+            ) p ON ct.transaction_id = p.transaction_id
+            WHERE ct.broker_id=%s""",
             conn, params=(_today_iso, bid)).iloc[0]
 
         st.markdown(f"""
@@ -828,8 +841,14 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
         st.markdown("<hr>", unsafe_allow_html=True)
 
         # ── FETCH + FILTER TRANSACTIONS ──────────────────────────
-        df_t = pg_read_sql(
-            "SELECT * FROM customer_transactions WHERE broker_id=%s ORDER BY date ASC",
+        df_t = pg_read_sql("""
+            SELECT ct.*, COALESCE(p.paid, 0) AS total_paid
+            FROM customer_transactions ct
+            LEFT JOIN (
+                SELECT transaction_id, SUM(amount) AS paid
+                FROM payments GROUP BY transaction_id
+            ) p ON ct.transaction_id = p.transaction_id
+            WHERE ct.broker_id=%s ORDER BY ct.date ASC""",
             conn, params=(bid,))
         if fmode == "Single Date":
             df_t = df_t[df_t["date"] == str(st.session_state.filter_single)]
@@ -937,9 +956,12 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                 calc_cls = "cs-calculated" if calc_status == "Calculated" else "cs-pending"
                 bp_cls   = "badge-bp-paid" if brok_paid == "Paid" else "badge-bp-unpaid"
 
-                days_old   = days_between(txn["date"])
-                is_overdue = (txn["payment_status"] in ("Pending","Partial") and days_old > 60)
-                ov_over    = days_old - 60 if is_overdue else 0
+                days_old    = days_between(txn["date"])
+                outstanding = A - float(txn.get("total_paid", 0) or 0)
+                is_overdue  = (txn["payment_status"] in ("Pending","Partial")
+                               and days_old > 60
+                               and outstanding >= 0.075 * A)
+                ov_over     = days_old - 60 if is_overdue else 0
 
                 is_chk    = tid in st.session_state.selected_txns
                 _row_cols = st.columns([0.35, 2, 1.2, 1.3, 1.4, 0.9, 0.7, 0.7], gap="small")
