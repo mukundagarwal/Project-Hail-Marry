@@ -1,5 +1,7 @@
 """
 Shared CSS and HTML brand constants injected by every page.
+get_dashboard_css(light_mode) is used only by app.py to support the theme toggle.
+All inner pages use APP_CSS directly (always dark).
 """
 
 APP_CSS = """
@@ -134,3 +136,55 @@ BRAND_BAR_HTML = """
   </div>
 </div>
 """
+
+_LIGHT_OVERRIDES = """
+<style>
+html,body,[data-testid="stAppViewContainer"]{background:#f5f2ec!important;color:#2a2418!important}
+[data-testid="stSidebar"]{background:#edeae4!important}
+[data-testid="stSidebar"] *{color:#4a3e2a!important}
+[data-testid="stSidebar"] hr{border-color:#d5cfc4!important}
+[data-testid="stSidebar"] .stButton>button{background:#e0dbd2!important;color:#4a3e2a!important;border-color:#ccc5b8!important}
+[data-testid="stSidebar"] .stButton>button:hover{background:#8a5e12!important;color:#fff!important;border-color:#8a5e12!important}
+.brand-bar{border-bottom-color:#d5cfc4!important}
+.brand-name{color:#8a5e12!important}
+.brand-sub{color:#9a8a6e!important}
+.page-title{color:#8a5e12!important}
+.page-sub{color:#9a8a6e!important}
+.nav-card{background:#ffffff!important;border-color:#d5cfc4!important;box-shadow:0 2px 8px rgba(0,0,0,0.06)!important}
+.nav-card:hover{border-color:#8a5e12!important;box-shadow:0 6px 20px rgba(138,94,18,0.12)!important}
+.nav-card .card-num{color:#ede8df!important}
+.nav-card .card-label{color:#2a2418!important}
+.nav-card .card-desc{color:#8a7a60!important}
+.stat-pill{background:#ffffff!important;border-color:#d5cfc4!important}
+.stat-pill .sp-label{color:#9a8a6e!important}
+.stat-pill .sp-value{color:#8a5e12!important}
+.stat-pill .sp-sub{color:#b0a088!important}
+.stButton>button{background:#ede8e0!important;color:#4a3e2a!important;border-color:#d5cfc4!important}
+.stButton>button:hover{background:#8a5e12!important;color:#ffffff!important;border-color:#8a5e12!important}
+.back-btn>button{color:#9a8a6e!important}
+.back-btn>button:hover{color:#8a5e12!important;background:transparent!important}
+[data-testid="stTextInput"] input{background:#ffffff!important;border-color:#d5cfc4!important;color:#2a2418!important}
+[data-testid="stTextInput"] input:focus{border-color:#8a5e12!important;box-shadow:0 0 0 2px rgba(138,94,18,0.12)!important}
+[data-testid="stTextInput"] label{color:#9a8a6e!important}
+hr{border-color:#d5cfc4!important}
+.theme-pill{background:#ffffff;border:1px solid #d5cfc4;border-radius:12px;padding:0.45rem 0.9rem;display:flex;align-items:center;gap:0.5rem;justify-content:flex-end;box-shadow:0 1px 4px rgba(0,0,0,0.06)}
+::-webkit-scrollbar-track{background:#f0ece4!important}
+::-webkit-scrollbar-thumb{background:#d5cfc4!important}
+</style>
+"""
+
+_TOGGLE_WRAP_CSS = """
+<style>
+.theme-pill{background:#1a1814;border:1px solid #2a2820;border-radius:12px;padding:0.45rem 0.9rem;display:flex;align-items:center;gap:0.5rem;justify-content:flex-end}
+/* Align toggle vertically with brand bar */
+div[data-testid="column"]:last-child{display:flex;flex-direction:column;justify-content:center}
+</style>
+"""
+
+
+def get_dashboard_css(light_mode: bool = False) -> str:
+    """Return the full CSS to inject on the dashboard page."""
+    base = APP_CSS + _TOGGLE_WRAP_CSS
+    if light_mode:
+        return base + _LIGHT_OVERRIDES
+    return base

@@ -6,7 +6,7 @@ All feature logic lives in pages/ and shared utils live in utils/.
 
 import streamlit as st
 from utils.db import ensure_schema
-from utils.styles import APP_CSS, BRAND_BAR_HTML
+from utils.styles import get_dashboard_css, BRAND_BAR_HTML
 from utils.auth import require_login, render_logout_button
 
 st.set_page_config(
@@ -20,8 +20,24 @@ require_login()
 render_logout_button()
 ensure_schema()
 
-st.markdown(APP_CSS, unsafe_allow_html=True)
-st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
+if "light_mode" not in st.session_state:
+    st.session_state.light_mode = False
+
+st.markdown(get_dashboard_css(st.session_state.light_mode), unsafe_allow_html=True)
+
+# ── Header row: brand bar left, theme toggle right ────────────
+hdr_col, toggle_col = st.columns([7, 1.4])
+with hdr_col:
+    st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
+with toggle_col:
+    st.markdown('<div class="theme-pill">', unsafe_allow_html=True)
+    icon = "☀️" if not st.session_state.light_mode else "🌙"
+    label = f"{icon} {'Light' if not st.session_state.light_mode else 'Dark'}"
+    new_mode = st.toggle(label, value=st.session_state.light_mode, key="theme_toggle")
+    st.markdown('</div>', unsafe_allow_html=True)
+    if new_mode != st.session_state.light_mode:
+        st.session_state.light_mode = new_mode
+        st.rerun()
 
 st.markdown('<div class="page-title">Dashboard</div>', unsafe_allow_html=True)
 st.markdown('<div class="page-sub">Select a module to continue</div>', unsafe_allow_html=True)
