@@ -206,15 +206,17 @@ def require_login() -> None:
             )
             st.stop()
 
-        pwd = st.text_input(
-            "Password",
-            type="password",
-            placeholder="Password",
-            label_visibility="collapsed",
-            key="_auth_pwd",
-        )
+        with st.form("login_form"):
+            pwd = st.text_input(
+                "Password",
+                type="password",
+                placeholder="Password",
+                label_visibility="collapsed",
+                key="_auth_pwd",
+            )
+            submitted = st.form_submit_button("Sign In →", use_container_width=True)
 
-        if st.button("Sign In →", use_container_width=True, key="_auth_btn"):
+        if submitted:
             try:
                 stored_hash = _get_password_hash()
                 if bcrypt.checkpw(pwd.encode(), stored_hash):

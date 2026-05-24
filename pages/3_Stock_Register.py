@@ -149,29 +149,30 @@ if st.session_state.stock_page == "home":
         _, add_col = st.columns([6, 1.2])
         with add_col:
             with st.popover("＋ Add Category", use_container_width=True):
-                new_cat = st.text_input("Category Name", key="new_cat_name")
-                if st.button("Save Category", key="save_cat_btn"):
-                    name = new_cat.strip()
-                    if not name:
-                        st.error("Name cannot be empty.")
-                    else:
-                        try:
-                            c2 = get_conn()
-                            _c2_row = c2.execute(
-                                "INSERT INTO stock_categories (category_name) VALUES (%s) "
-                                "RETURNING category_id", (name,))
-                            _c2_id = _c2_row.fetchone()["category_id"]
-                            for _loc in ["Transport", "Shop", "Anandpuri"]:
-                                c2.execute(
-                                    "INSERT INTO unidentified_stock "
-                                    "(category_id, location, bags, quantity_kg) VALUES (%s,%s,0,0)",
-                                    (_c2_id, _loc))
-                            c2.commit()
-                            c2.close()
-                            st.success(f"Added '{name}'")
-                            st.rerun()
-                        except psycopg2.errors.UniqueViolation:
-                            st.error(f"'{name}' already exists.")
+                with st.form("add_category_form"):
+                    new_cat = st.text_input("Category Name", key="new_cat_name")
+                    if st.form_submit_button("Save Category", use_container_width=True):
+                        name = new_cat.strip()
+                        if not name:
+                            st.error("Name cannot be empty.")
+                        else:
+                            try:
+                                c2 = get_conn()
+                                _c2_row = c2.execute(
+                                    "INSERT INTO stock_categories (category_name) VALUES (%s) "
+                                    "RETURNING category_id", (name,))
+                                _c2_id = _c2_row.fetchone()["category_id"]
+                                for _loc in ["Transport", "Shop", "Anandpuri"]:
+                                    c2.execute(
+                                        "INSERT INTO unidentified_stock "
+                                        "(category_id, location, bags, quantity_kg) VALUES (%s,%s,0,0)",
+                                        (_c2_id, _loc))
+                                c2.commit()
+                                c2.close()
+                                st.toast(f"Category '{name}' added.", icon="✓")
+                                st.rerun()
+                            except psycopg2.errors.UniqueViolation:
+                                st.error(f"'{name}' already exists.")
 
         # Category cards — fetch all data in 4 queries instead of 5×N
         cats = conn.execute(

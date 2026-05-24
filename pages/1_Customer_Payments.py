@@ -219,24 +219,25 @@ if st.session_state.page == "customer":
             search = st.text_input("", placeholder="🔍  Search broker name...", label_visibility="collapsed")
         with s2:
             with st.popover("＋  Add Broker", use_container_width=True):
-                nb = st.text_input("Broker Name", key="new_broker_name")
-                if st.button("Save Broker"):
-                    name_clean = nb.strip()
-                    if not name_clean:
-                        st.error("Name cannot be empty.")
-                    else:
-                        max_row = conn.execute("SELECT COALESCE(MAX(broker_id),100) AS mx FROM brokers").fetchone()
-                        next_id = int(max_row["mx"]) + 1
-                        try:
-                            conn.execute("INSERT INTO brokers (broker_id,broker_name) VALUES (%s,%s)",
-                                         (next_id, name_clean))
-                            conn.commit()
-                            invalidate_lookup_cache()
-                            st.success(f"Added '{name_clean}'")
-                            st.rerun()
-                        except psycopg2.IntegrityError:
-                            conn.rollback()
-                            st.error("A broker with this name already exists.")
+                with st.form("add_broker_form"):
+                    nb = st.text_input("Broker Name", key="new_broker_name")
+                    if st.form_submit_button("Save Broker", use_container_width=True):
+                        name_clean = nb.strip()
+                        if not name_clean:
+                            st.error("Name cannot be empty.")
+                        else:
+                            max_row = conn.execute("SELECT COALESCE(MAX(broker_id),100) AS mx FROM brokers").fetchone()
+                            next_id = int(max_row["mx"]) + 1
+                            try:
+                                conn.execute("INSERT INTO brokers (broker_id,broker_name) VALUES (%s,%s)",
+                                             (next_id, name_clean))
+                                conn.commit()
+                                invalidate_lookup_cache()
+                                st.toast(f"Broker '{name_clean}' added.", icon="✓")
+                                st.rerun()
+                            except psycopg2.IntegrityError:
+                                conn.rollback()
+                                st.error("A broker with this name already exists.")
 
         st.markdown("<hr>", unsafe_allow_html=True)
         df_b = pd.DataFrame(get_all_brokers_cached())

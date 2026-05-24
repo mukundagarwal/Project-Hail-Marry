@@ -157,9 +157,24 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
 def get_conn() -> _PgConn:
     """Open a new PostgreSQL connection wrapped in _PgConn."""
     pool = _get_pool()
-    pg_conn = pool.getconn()
-    pg_conn.autocommit = False
-    return _PgConn(pg_conn, pool=pool)
+    for _attempt in range(3):
+        pg_conn = pool.getconn()
+        try:
+            if pg_conn.closed:
+                pool.putconn(pg_conn, close=True)
+                continue
+            # If the previous user left the connection mid-transaction or in an
+            # error state, rollback to reset it before reuse.
+            if pg_conn.status != psycopg2.extensions.STATUS_READY:
+                pg_conn.rollback()
+            pg_conn.autocommit = False
+            return _PgConn(pg_conn, pool=pool)
+        except Exception:
+            try:
+                pool.putconn(pg_conn, close=True)
+            except Exception:
+                pass
+    raise RuntimeError("Could not obtain a healthy database connection from the pool")
 
 
 def pg_read_sql(sql, conn, params=None):

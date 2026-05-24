@@ -423,44 +423,45 @@ elif st.session_state.pb_page == "firm":
                 'border-radius:10px;padding:1rem 1.2rem;margin-bottom:0.8rem">',
                 unsafe_allow_html=True)
             st.markdown("**⚙ Set Opening Balance**")
-            ob1, ob2 = st.columns(2)
-            with ob1:
-                ob_amt  = st.number_input("Opening Amount (₹, can be negative)",
-                                          value=_prev_amt, step=100.0,
-                                          format="%.2f", key="pb_ob_amt")
-                ob_date = st.date_input("Opening Date", value=_prev_date, key="pb_ob_date")
-            with ob2:
-                ob_note = st.text_area("Notes (optional)", value=_prev_note,
-                                       key="pb_ob_note", height=80)
-            obs1, obs2, _ = st.columns([1, 1, 4])
-            with obs1:
-                if st.button("💾 Save", key="pb_ob_save", use_container_width=True):
-                    _oa    = round(ob_amt, 2)
-                    _otype = 'Credit' if _oa >= 0 else 'Debit'
-                    with conn:
-                        conn.execute(
-                            "INSERT INTO passbook_opening_balance "
-                            "(firm,opening_amount,opening_date,notes) VALUES (%s,%s,%s,%s) "
-                            "ON CONFLICT(firm) DO UPDATE SET "
-                            "opening_amount=excluded.opening_amount,"
-                            "opening_date=excluded.opening_date,"
-                            "notes=excluded.notes",
-                            (firm, _oa, str(ob_date), ob_note.strip()))
-                        conn.execute(
-                            "DELETE FROM passbook_entries "
-                            "WHERE firm=%s AND source_type=%s", (firm, SRC_OPENING))
-                        conn.execute(
-                            "INSERT INTO passbook_entries "
-                            "(firm,entry_date,details,amount,txn_type,source_type) "
-                            "VALUES (%s,%s,'Opening Balance',%s,%s,%s)",
-                            (firm, str(ob_date), abs(_oa), _otype, SRC_OPENING))
-                    st.session_state.pb_show_ob_form = False
-                    st.success("Opening balance updated.")
-                    st.rerun()
-            with obs2:
-                if st.button("✕ Cancel", key="pb_ob_cancel", use_container_width=True):
-                    st.session_state.pb_show_ob_form = False
-                    st.rerun()
+            with st.form("pb_ob_form"):
+                ob1, ob2 = st.columns(2)
+                with ob1:
+                    ob_amt  = st.number_input("Opening Amount (₹, can be negative)",
+                                              value=_prev_amt, step=100.0,
+                                              format="%.2f", key="pb_ob_amt")
+                    ob_date = st.date_input("Opening Date", value=_prev_date, key="pb_ob_date")
+                with ob2:
+                    ob_note = st.text_area("Notes (optional)", value=_prev_note,
+                                           key="pb_ob_note", height=80)
+                obs1, obs2, _ = st.columns([1, 1, 4])
+                with obs1:
+                    if st.form_submit_button("💾 Save", use_container_width=True):
+                        _oa    = round(ob_amt, 2)
+                        _otype = 'Credit' if _oa >= 0 else 'Debit'
+                        with conn:
+                            conn.execute(
+                                "INSERT INTO passbook_opening_balance "
+                                "(firm,opening_amount,opening_date,notes) VALUES (%s,%s,%s,%s) "
+                                "ON CONFLICT(firm) DO UPDATE SET "
+                                "opening_amount=excluded.opening_amount,"
+                                "opening_date=excluded.opening_date,"
+                                "notes=excluded.notes",
+                                (firm, _oa, str(ob_date), ob_note.strip()))
+                            conn.execute(
+                                "DELETE FROM passbook_entries "
+                                "WHERE firm=%s AND source_type=%s", (firm, SRC_OPENING))
+                            conn.execute(
+                                "INSERT INTO passbook_entries "
+                                "(firm,entry_date,details,amount,txn_type,source_type) "
+                                "VALUES (%s,%s,'Opening Balance',%s,%s,%s)",
+                                (firm, str(ob_date), abs(_oa), _otype, SRC_OPENING))
+                        st.session_state.pb_show_ob_form = False
+                        st.toast("Opening balance updated.", icon="✓")
+                        st.rerun()
+                with obs2:
+                    if st.form_submit_button("✕ Cancel", use_container_width=True):
+                        st.session_state.pb_show_ob_form = False
+                        st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown("<hr>", unsafe_allow_html=True)
@@ -1055,39 +1056,43 @@ elif st.session_state.pb_page == "cash":
                 'border-radius:10px;padding:1rem 1.2rem;margin-bottom:0.8rem">',
                 unsafe_allow_html=True)
             st.markdown("**＋ Add Transaction**")
-            caf1, caf2 = st.columns(2)
-            with caf1:
-                ca_date   = st.date_input("Date", value=date.today(), key="cih_af_date")
-                ca_amount = st.number_input("Amount (₹)", min_value=0.01, step=100.0,
-                                            format="%.2f", key="cih_af_amount")
-            with caf2:
-                ca_type    = st.radio("Type", ["Credit", "Debit"], horizontal=True,
-                                      key="cih_af_type")
-                ca_details = st.text_input("Details (required)", key="cih_af_details")
+            with st.form("cih_add_form"):
+                caf1, caf2 = st.columns(2)
+                with caf1:
+                    ca_date   = st.date_input("Date", value=date.today(), key="cih_af_date")
+                    ca_amount = st.number_input("Amount (₹)", min_value=0.01, step=100.0,
+                                                format="%.2f", key="cih_af_amount")
+                with caf2:
+                    ca_type    = st.radio("Type", ["Credit", "Debit"], horizontal=True,
+                                          key="cih_af_type")
+                    ca_details = st.text_input("Details (required)", key="cih_af_details")
 
-            cafs1, cafs2, _ = st.columns([1, 1, 4])
-            with cafs1:
-                if st.button("💾 Save", key="cih_af_save", use_container_width=True):
-                    _cdet = ca_details.strip()
-                    if not _cdet:
-                        st.error("Details required.")
-                    elif ca_amount <= 0:
-                        st.error("Amount must be > 0.")
-                    else:
-                        with conn:
-                            conn.execute(
-                                "INSERT INTO cash_in_hand_entries "
-                                "(entry_date,details,amount,txn_type,source_type) "
-                                "VALUES (%s,%s,%s,%s,%s)",
-                                (str(ca_date), _cdet, round(ca_amount, 2),
-                                 ca_type, SRC_MANUAL))
-                        st.session_state.pb_show_cih_add_form = False
-                        st.success("Transaction saved.")
-                        st.rerun()
-            with cafs2:
-                if st.button("✕ Cancel", key="cih_af_cancel", use_container_width=True):
+                cafs1, cafs2, _ = st.columns([1, 1, 4])
+                with cafs1:
+                    _cih_save = st.form_submit_button("💾 Save", use_container_width=True)
+                with cafs2:
+                    _cih_cancel = st.form_submit_button("✕ Cancel", use_container_width=True)
+
+            if _cih_save:
+                _cdet = ca_details.strip()
+                if not _cdet:
+                    st.error("Details required.")
+                elif ca_amount <= 0:
+                    st.error("Amount must be > 0.")
+                else:
+                    with conn:
+                        conn.execute(
+                            "INSERT INTO cash_in_hand_entries "
+                            "(entry_date,details,amount,txn_type,source_type) "
+                            "VALUES (%s,%s,%s,%s,%s)",
+                            (str(ca_date), _cdet, round(ca_amount, 2),
+                             ca_type, SRC_MANUAL))
                     st.session_state.pb_show_cih_add_form = False
+                    st.toast("Transaction saved.", icon="✓")
                     st.rerun()
+            if _cih_cancel:
+                st.session_state.pb_show_cih_add_form = False
+                st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
         # ══════════════════════════════════════════════════════
@@ -1107,46 +1112,50 @@ elif st.session_state.pb_page == "cash":
                 'border-radius:10px;padding:1rem 1.2rem;margin-bottom:0.8rem">',
                 unsafe_allow_html=True)
             st.markdown("**⚙ Set Opening Balance**")
-            cob1, cob2 = st.columns(2)
-            with cob1:
-                cob_amt  = st.number_input("Opening Amount (₹, can be negative)",
-                                           value=_prev_amt, step=100.0,
-                                           format="%.2f", key="cih_ob_amt")
-                cob_date = st.date_input("Opening Date", value=_prev_date,
-                                         key="cih_ob_date")
-            with cob2:
-                cob_note = st.text_area("Notes (optional)", value=_prev_note,
-                                        key="cih_ob_note", height=80)
-            cobs1, cobs2, _ = st.columns([1, 1, 4])
-            with cobs1:
-                if st.button("💾 Save", key="cih_ob_save", use_container_width=True):
-                    _coa    = round(cob_amt, 2)
-                    _cotype = 'Credit' if _coa >= 0 else 'Debit'
-                    with conn:
-                        conn.execute(
-                            "INSERT INTO cash_in_hand_opening "
-                            "(id,opening_amount,opening_date,notes) VALUES (1,%s,%s,%s) "
-                            "ON CONFLICT(id) DO UPDATE SET "
-                            "opening_amount=excluded.opening_amount,"
-                            "opening_date=excluded.opening_date,"
-                            "notes=excluded.notes",
-                            (_coa, str(cob_date), cob_note.strip()))
-                        conn.execute(
-                            "DELETE FROM cash_in_hand_entries WHERE source_type=%s",
-                            (SRC_CIH_OPENING,))
-                        conn.execute(
-                            "INSERT INTO cash_in_hand_entries "
-                            "(entry_date,details,amount,txn_type,source_type) "
-                            "VALUES (%s,%s,%s,%s,%s)",
-                            (str(cob_date), 'Opening Balance',
-                             abs(_coa), _cotype, SRC_CIH_OPENING))
-                    st.session_state.pb_show_cih_ob_form = False
-                    st.success("Opening balance updated.")
-                    st.rerun()
-            with cobs2:
-                if st.button("✕ Cancel", key="cih_ob_cancel", use_container_width=True):
-                    st.session_state.pb_show_cih_ob_form = False
-                    st.rerun()
+            with st.form("cih_ob_form"):
+                cob1, cob2 = st.columns(2)
+                with cob1:
+                    cob_amt  = st.number_input("Opening Amount (₹, can be negative)",
+                                               value=_prev_amt, step=100.0,
+                                               format="%.2f", key="cih_ob_amt")
+                    cob_date = st.date_input("Opening Date", value=_prev_date,
+                                             key="cih_ob_date")
+                with cob2:
+                    cob_note = st.text_area("Notes (optional)", value=_prev_note,
+                                            key="cih_ob_note", height=80)
+                cobs1, cobs2, _ = st.columns([1, 1, 4])
+                with cobs1:
+                    _cob_save = st.form_submit_button("💾 Save", use_container_width=True)
+                with cobs2:
+                    _cob_cancel = st.form_submit_button("✕ Cancel", use_container_width=True)
+
+            if _cob_save:
+                _coa    = round(cob_amt, 2)
+                _cotype = 'Credit' if _coa >= 0 else 'Debit'
+                with conn:
+                    conn.execute(
+                        "INSERT INTO cash_in_hand_opening "
+                        "(id,opening_amount,opening_date,notes) VALUES (1,%s,%s,%s) "
+                        "ON CONFLICT(id) DO UPDATE SET "
+                        "opening_amount=excluded.opening_amount,"
+                        "opening_date=excluded.opening_date,"
+                        "notes=excluded.notes",
+                        (_coa, str(cob_date), cob_note.strip()))
+                    conn.execute(
+                        "DELETE FROM cash_in_hand_entries WHERE source_type=%s",
+                        (SRC_CIH_OPENING,))
+                    conn.execute(
+                        "INSERT INTO cash_in_hand_entries "
+                        "(entry_date,details,amount,txn_type,source_type) "
+                        "VALUES (%s,%s,%s,%s,%s)",
+                        (str(cob_date), 'Opening Balance',
+                         abs(_coa), _cotype, SRC_CIH_OPENING))
+                st.session_state.pb_show_cih_ob_form = False
+                st.toast("Opening balance updated.", icon="✓")
+                st.rerun()
+            if _cob_cancel:
+                st.session_state.pb_show_cih_ob_form = False
+                st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown("<hr>", unsafe_allow_html=True)

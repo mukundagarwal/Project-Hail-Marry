@@ -363,49 +363,50 @@ def _payment_popover(vendor_id: int, ledger_type: str, firm, conn):
     _k          = f"{vendor_id}_{ledger_type}_{firm or 'ub'}"
     particulars = "RTGS Payment" if ledger_type == "RTGS" else "UB Payment"
     with st.popover("💳 Record Payment", use_container_width=True):
-        p_date = st.date_input("Payment Date", value=date.today(), key=f"pfd_{_k}")
-        p_amt  = st.number_input("Payment Amount (₹)", min_value=0.0, step=100.0,
-                                 format="%.2f", key=f"pfa_{_k}")
-        note_s = st.text_input(
-            "Note (optional)",
-            placeholder="e.g. part payment, cheque no. 12345, etc.",
-            key=f"pfnt_{_k}")
-        if st.button("💾 Save Payment", key=f"pfsv_{_k}", use_container_width=True):
-            if p_amt <= 0:
-                st.error("Amount must be > 0.")
-            else:
-                # Positive amount = payment (we reduce our debt)
-                with conn:
-                    cur = conn.execute(
-                        """INSERT INTO vendor_entries
-                           (vendor_id,entry_date,ledger_type,firm,entry_kind,
-                            particulars,amount,good_id,bags,quantity_kg,note)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,0,0,%s)
-                           RETURNING entry_id""",
-                        (vendor_id, str(p_date), ledger_type, firm,
-                         "Payment", particulars, p_amt, note_s.strip()))
-                    new_eid = cur.fetchone()["entry_id"]
-                    _vrow  = conn.execute(
-                        "SELECT vendor_name FROM vendors WHERE vendor_id=%s",
-                        (vendor_id,)).fetchone()
-                    _vname = _vrow["vendor_name"] if _vrow else f"Vendor #{vendor_id}"
-                    # ── Passbook sync: RTGS payments debit the bank account ──
-                    if ledger_type == "RTGS" and firm:
-                        conn.execute(
-                            "INSERT INTO passbook_entries "
-                            "(firm,entry_date,details,amount,txn_type,"
-                            " source_type,source_id) "
-                            "VALUES (%s,%s,%s,%s,'Debit',%s,%s)",
-                            (firm, str(p_date), _vname, p_amt, SRC_VENDOR_RTGS, new_eid))
-                    # ── CASH IN HAND SYNC ──────────────────────────────
-                    if ledger_type == "UB":
-                        conn.execute(
-                            "INSERT INTO cash_in_hand_entries "
-                            "(entry_date,details,amount,txn_type,source_type,source_id) "
-                            "VALUES (%s,%s,%s,%s,%s,%s)",
-                            (str(p_date), _vname, p_amt, 'Debit', SRC_VENDOR_UB, new_eid))
-                st.success(f"Payment of {fmt_inr(p_amt)} recorded.")
-                st.rerun()
+        with st.form(f"payment_form_{_k}"):
+            p_date = st.date_input("Payment Date", value=date.today(), key=f"pfd_{_k}")
+            p_amt  = st.number_input("Payment Amount (₹)", min_value=0.0, step=100.0,
+                                     format="%.2f", key=f"pfa_{_k}")
+            note_s = st.text_input(
+                "Note (optional)",
+                placeholder="e.g. part payment, cheque no. 12345, etc.",
+                key=f"pfnt_{_k}")
+            if st.form_submit_button("💾 Save Payment", use_container_width=True):
+                if p_amt <= 0:
+                    st.error("Amount must be > 0.")
+                else:
+                    # Positive amount = payment (we reduce our debt)
+                    with conn:
+                        cur = conn.execute(
+                            """INSERT INTO vendor_entries
+                               (vendor_id,entry_date,ledger_type,firm,entry_kind,
+                                particulars,amount,good_id,bags,quantity_kg,note)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,0,0,%s)
+                               RETURNING entry_id""",
+                            (vendor_id, str(p_date), ledger_type, firm,
+                             "Payment", particulars, p_amt, note_s.strip()))
+                        new_eid = cur.fetchone()["entry_id"]
+                        _vrow  = conn.execute(
+                            "SELECT vendor_name FROM vendors WHERE vendor_id=%s",
+                            (vendor_id,)).fetchone()
+                        _vname = _vrow["vendor_name"] if _vrow else f"Vendor #{vendor_id}"
+                        # ── Passbook sync: RTGS payments debit the bank account ──
+                        if ledger_type == "RTGS" and firm:
+                            conn.execute(
+                                "INSERT INTO passbook_entries "
+                                "(firm,entry_date,details,amount,txn_type,"
+                                " source_type,source_id) "
+                                "VALUES (%s,%s,%s,%s,'Debit',%s,%s)",
+                                (firm, str(p_date), _vname, p_amt, SRC_VENDOR_RTGS, new_eid))
+                        # ── CASH IN HAND SYNC ──────────────────────────────
+                        if ledger_type == "UB":
+                            conn.execute(
+                                "INSERT INTO cash_in_hand_entries "
+                                "(entry_date,details,amount,txn_type,source_type,source_id) "
+                                "VALUES (%s,%s,%s,%s,%s,%s)",
+                                (str(p_date), _vname, p_amt, 'Debit', SRC_VENDOR_UB, new_eid))
+                    st.toast(f"Payment of {fmt_inr(p_amt)} recorded.", icon="✓")
+                    st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -953,25 +954,26 @@ if st.session_state.vp_page == "home":
                                    label_visibility="collapsed", key="vp_search")
         with sv2:
             with st.popover("＋ Add Vendor", use_container_width=True):
-                new_name = st.text_input("Vendor Name", key="vp_new_vendor_name")
-                if st.button("Save Vendor", key="vp_save_vendor_btn"):
-                    nm = new_name.strip()
-                    if not nm:
-                        st.error("Name cannot be empty.")
-                    else:
-                        try:
-                            max_id = conn.execute(
-                                "SELECT COALESCE(MAX(vendor_id),100) AS v FROM vendors"
-                            ).fetchone()["v"]
-                            conn.execute(
-                                "INSERT INTO vendors (vendor_id, vendor_name) VALUES (%s,%s)",
-                                (int(max_id) + 1, nm))
-                            conn.commit()
-                            invalidate_lookup_cache()
-                            st.success(f"Added '{nm}'")
-                            st.rerun()
-                        except psycopg2.errors.UniqueViolation:
-                            st.error(f"'{nm}' already exists.")
+                with st.form("add_vendor_form"):
+                    new_name = st.text_input("Vendor Name", key="vp_new_vendor_name")
+                    if st.form_submit_button("Save Vendor", use_container_width=True):
+                        nm = new_name.strip()
+                        if not nm:
+                            st.error("Name cannot be empty.")
+                        else:
+                            try:
+                                max_id = conn.execute(
+                                    "SELECT COALESCE(MAX(vendor_id),100) AS v FROM vendors"
+                                ).fetchone()["v"]
+                                conn.execute(
+                                    "INSERT INTO vendors (vendor_id, vendor_name) VALUES (%s,%s)",
+                                    (int(max_id) + 1, nm))
+                                conn.commit()
+                                invalidate_lookup_cache()
+                                st.toast(f"Vendor '{nm}' added.", icon="✓")
+                                st.rerun()
+                            except psycopg2.errors.UniqueViolation:
+                                st.error(f"'{nm}' already exists.")
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
