@@ -6,6 +6,7 @@ Uses PostgreSQL (Supabase) via psycopg2.
 
 import os
 import json
+import time
 import threading
 import psycopg2
 import psycopg2.extras
@@ -157,24 +158,42 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
 def get_conn() -> _PgConn:
     """Open a new PostgreSQL connection wrapped in _PgConn."""
     pool = _get_pool()
-    for _attempt in range(3):
-        pg_conn = pool.getconn()
+    last_exc: Exception | None = None
+    for _attempt in range(5):
+        try:
+            pg_conn = pool.getconn()
+        except Exception as e:
+            last_exc = e
+            if _attempt < 4:
+                time.sleep(1)
+            continue
         try:
             if pg_conn.closed:
                 pool.putconn(pg_conn, close=True)
                 continue
-            # If the previous user left the connection mid-transaction or in an
-            # error state, rollback to reset it before reuse.
             if pg_conn.status != psycopg2.extensions.STATUS_READY:
                 pg_conn.rollback()
+            # Live ping: psycopg2 reports closed=0/STATUS_READY even when the
+            # underlying TCP socket is dead (Neon serverless hibernation drops
+            # connections after ~5 min of inactivity). SELECT 1 forces a real
+            # round-trip so we catch the broken socket before returning.
+            with pg_conn.cursor() as _ping:
+                _ping.execute("SELECT 1")
+            pg_conn.rollback()
             pg_conn.autocommit = False
             return _PgConn(pg_conn, pool=pool)
-        except Exception:
+        except Exception as e:
+            last_exc = e
             try:
                 pool.putconn(pg_conn, close=True)
             except Exception:
                 pass
-    raise RuntimeError("Could not obtain a healthy database connection from the pool")
+            if _attempt < 4:
+                time.sleep(1)
+    raise RuntimeError(
+        f"Could not obtain a healthy database connection after 5 attempts. "
+        f"Last error: {last_exc}"
+    )
 
 
 def pg_read_sql(sql, conn, params=None):
