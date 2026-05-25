@@ -359,9 +359,11 @@ def _sqlite_ddl(conn):
         """CREATE TABLE IF NOT EXISTS stock_levels (
             good_id     INTEGER NOT NULL REFERENCES stock_goods(good_id),
             location    TEXT NOT NULL,
+            batch_label TEXT NOT NULL DEFAULT '',
+            batch_notes TEXT,
             bags        REAL NOT NULL DEFAULT 0,
             quantity_kg REAL NOT NULL DEFAULT 0,
-            UNIQUE (good_id, location)
+            UNIQUE (good_id, location, batch_label)
         )""",
         """CREATE TABLE IF NOT EXISTS unidentified_stock (
             category_id INTEGER NOT NULL REFERENCES stock_categories(category_id),
@@ -440,6 +442,30 @@ def ensure_schema(conn=None):
         # SQLite (tests): create tables since Supabase DDL isn't available
         if _is_sqlite:
             _sqlite_ddl(conn)
+
+        # ── Migration: batch columns on stock_levels (PostgreSQL) ──
+        if not _is_sqlite:
+            for _msql in [
+                "ALTER TABLE stock_levels ADD COLUMN IF NOT EXISTS batch_label TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE stock_levels ADD COLUMN IF NOT EXISTS batch_notes TEXT",
+            ]:
+                conn.execute(_msql)
+            conn.execute(
+                "ALTER TABLE stock_levels DROP CONSTRAINT IF EXISTS stock_levels_good_id_location_key"
+            )
+            conn.execute("""
+                DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'stock_levels_good_id_location_batch_key'
+                    ) THEN
+                        ALTER TABLE stock_levels
+                            ADD CONSTRAINT stock_levels_good_id_location_batch_key
+                            UNIQUE (good_id, location, batch_label);
+                    END IF;
+                END $$
+            """)
+            conn.commit()
 
         # ── Seed stock categories & goods ──────────────────────
         for cat_name, goods_list in _STOCK_SEEDS.items():
@@ -673,7 +699,7 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
             FROM stock_levels sl
             JOIN stock_goods sg ON sl.good_id = sg.good_id
             JOIN stock_categories sc ON sg.category_id = sc.category_id
-            WHERE sl.good_id = %s AND sl.location = %s
+            WHERE sl.good_id = %s AND sl.location = %s AND sl.batch_label = ''
         """, (gid, loc)).fetchone()
         _cs_b_bags = float(_cs_row["bags"] or 0) if _cs_row else 0
         _cs_b_kg   = float(_cs_row["quantity_kg"] or 0) if _cs_row else 0.0
@@ -682,7 +708,7 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
 
         conn.execute(
             "UPDATE stock_levels SET bags=bags-%s, quantity_kg=quantity_kg-%s "
-            "WHERE good_id=%s AND location=%s",
+            "WHERE good_id=%s AND location=%s AND batch_label=''",
             (bags_sold, kg_sold, gid, loc))
 
         conn.execute(
@@ -707,7 +733,7 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
 
         updated = conn.execute(
             "SELECT bags, quantity_kg FROM stock_levels "
-            "WHERE good_id=%s AND location=%s", (gid, loc)).fetchone()
+            "WHERE good_id=%s AND location=%s AND batch_label=''", (gid, loc)).fetchone()
         if updated and (updated["bags"] < 0 or updated["quantity_kg"] < 0):
             warnings.append(
                 f"⚠ {it['goods']} at {loc} is now below zero "

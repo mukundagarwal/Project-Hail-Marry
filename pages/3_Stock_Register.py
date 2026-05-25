@@ -335,11 +335,12 @@ elif st.session_state.stock_page == "category":
 
         df_levels = pg_read_sql("""
             SELECT sg.good_id, sg.good_name, sl.location,
+                   sl.batch_label, sl.batch_notes,
                    sl.bags, sl.quantity_kg
             FROM stock_goods sg
             JOIN stock_levels sl ON sl.good_id = sg.good_id
             WHERE sg.category_id = %s
-            ORDER BY sg.good_name, sl.location""",
+            ORDER BY sg.good_name, sl.location, sl.batch_label""",
             conn, params=(cat_id,))
 
         # ── Negative stock alert for this category ───────────────
@@ -350,6 +351,7 @@ elif st.session_state.stock_page == "category":
                 f'border-radius:5px;padding:2px 10px;margin:2px 4px 2px 0;'
                 f'font-size:0.8rem;color:#ff8080">'
                 f'{h(r["good_name"])} @ {h(r["location"])} '
+                f'{("[" + h(str(r["batch_label"])) + "] ") if r["batch_label"] else ""}'
                 f'({int(r["bags"])} bags / {float(r["quantity_kg"]):.1f} Kg)'
                 f'</span>'
                 for _, r in neg_cat.iterrows()
@@ -459,39 +461,92 @@ elif st.session_state.stock_page == "category":
                             st.session_state[_unid_edit_key] = False
                             st.rerun()
 
-                # Goods table — hide zero-stock rows for display only
-                df_display = df_loc[
-                    (df_loc["bags"] != 0) | (df_loc["quantity_kg"] != 0)
-                ].copy()
+                # Goods table — group by good, show batch sub-rows
+                _any_stock = False
+                rows_html  = ""
+                for _gname in sorted(df_loc['good_name'].unique()):
+                    _grp    = df_loc[df_loc['good_name'] == _gname]
+                    _named  = _grp[_grp['batch_label'] != '']
+                    _agg_b  = _grp['bags'].sum()
+                    _agg_k  = _grp['quantity_kg'].sum()
+                    if _agg_b == 0 and _agg_k == 0 and _named.empty:
+                        continue
+                    _any_stock = True
 
-                if df_display.empty:
+                    if _named.empty:
+                        # No batches — single row (existing style)
+                        _dr      = _grp.iloc[0]
+                        _is_neg  = int(_dr["bags"]) < 0 or float(_dr["quantity_kg"]) < 0
+                        _row_bg  = 'background:#2a0808;' if _is_neg else ''
+                        _nc      = '#ff8080' if _is_neg else '#c8bfa8'
+                        _bc      = '#ff6060' if _is_neg else acc["color"]
+                        _kc      = '#ff6060' if _is_neg else '#8a8070'
+                        _alert   = (' <span style="font-size:0.6rem;background:#7a1a1a;color:#ffaaaa;'
+                                    'border-radius:3px;padding:1px 5px;vertical-align:middle">NEG</span>'
+                                    ) if _is_neg else ''
+                        rows_html += (
+                            f'<tr style="{_row_bg}">'
+                            f'<td style="padding:5px 8px;color:{_nc};font-size:0.8rem">'
+                            f'{h(_gname)}{_alert}</td>'
+                            f'<td style="padding:5px 8px;text-align:right;color:{_bc};'
+                            f'font-size:0.8rem;font-weight:600">{int(_dr["bags"]):,}</td>'
+                            f'<td style="padding:5px 8px;text-align:right;color:{_kc};'
+                            f'font-size:0.8rem">{float(_dr["quantity_kg"]):,.1f}</td>'
+                            f'</tr>'
+                        )
+                    else:
+                        # Aggregate row
+                        _is_neg_agg = _agg_b < 0 or _agg_k < 0
+                        _agg_nc = '#ff8080' if _is_neg_agg else '#e8c97e'
+                        _agg_bc = '#ff6060' if _is_neg_agg else acc["color"]
+                        _nb     = len(_named)
+                        rows_html += (
+                            f'<tr style="background:#1a1812;">'
+                            f'<td style="padding:5px 8px;color:{_agg_nc};'
+                            f'font-size:0.8rem;font-weight:700">'
+                            f'{h(_gname)} '
+                            f'<span style="font-size:0.62rem;background:#2a2418;color:#6a5a38;'
+                            f'border-radius:3px;padding:1px 6px">'
+                            f'{_nb} batch{"es" if _nb != 1 else ""}</span></td>'
+                            f'<td style="padding:5px 8px;text-align:right;color:{_agg_bc};'
+                            f'font-size:0.8rem;font-weight:700">{int(_agg_b):,}</td>'
+                            f'<td style="padding:5px 8px;text-align:right;color:#6a9fd4;'
+                            f'font-size:0.8rem;font-weight:700">{float(_agg_k):,.1f}</td>'
+                            f'</tr>'
+                        )
+                        # Sub-rows (default '' row + named batches)
+                        for _, _br in _grp.iterrows():
+                            _bl     = str(_br['batch_label'])
+                            _bn     = str(_br['batch_notes'] or '')
+                            _dlbl   = _bl if _bl else 'Default'
+                            _is_neg = int(_br["bags"]) < 0 or float(_br["quantity_kg"]) < 0
+                            _nc     = '#ff8080' if _is_neg else '#9a9080'
+                            _bc     = '#ff6060' if _is_neg else acc["color"]
+                            _kc     = '#ff6060' if _is_neg else '#6a6050'
+                            _alert  = (' <span style="font-size:0.6rem;background:#7a1a1a;'
+                                       'color:#ffaaaa;border-radius:3px;padding:1px 4px">NEG</span>'
+                                       ) if _is_neg else ''
+                            _notes  = (f'<div style="font-size:0.68rem;color:#4a4438;'
+                                       f'font-style:italic;padding-left:0.8rem">{h(_bn)}</div>'
+                                       ) if _bn else ''
+                            rows_html += (
+                                f'<tr>'
+                                f'<td style="padding:3px 8px 3px 20px;color:{_nc};font-size:0.76rem">'
+                                f'↳ {h(_dlbl)}{_alert}{_notes}</td>'
+                                f'<td style="padding:3px 8px;text-align:right;color:{_bc};'
+                                f'font-size:0.76rem">{int(_br["bags"]):,}</td>'
+                                f'<td style="padding:3px 8px;text-align:right;color:{_kc};'
+                                f'font-size:0.76rem">{float(_br["quantity_kg"]):,.1f}</td>'
+                                f'</tr>'
+                            )
+
+                if not _any_stock:
                     st.markdown(
                         '<div style="padding:1rem;color:#3a3628;'
                         'font-size:.85rem;text-align:center">'
                         '📦 No stock at this location.</div>',
                         unsafe_allow_html=True)
                 else:
-                    rows_html = ""
-                    for _, row in df_display.iterrows():
-                        is_neg     = int(row["bags"]) < 0 or float(row["quantity_kg"]) < 0
-                        row_style  = 'background:#2a0808;' if is_neg else ''
-                        name_col   = '#ff8080'  if is_neg else '#c8bfa8'
-                        bags_col   = '#ff6060'  if is_neg else acc["color"]
-                        kg_col     = '#ff6060'  if is_neg else '#8a8070'
-                        alert_tag  = (
-                            ' <span style="font-size:0.6rem;background:#7a1a1a;color:#ffaaaa;'
-                            'border-radius:3px;padding:1px 5px;vertical-align:middle">NEG</span>'
-                        ) if is_neg else ''
-                        rows_html += (
-                            f'<tr style="{row_style}">'
-                            f'<td style="padding:5px 8px;color:{name_col};font-size:0.8rem">'
-                            f'{h(row["good_name"])}{alert_tag}</td>'
-                            f'<td style="padding:5px 8px;text-align:right;color:{bags_col};'
-                            f'font-size:0.8rem;font-weight:600">{int(row["bags"]):,}</td>'
-                            f'<td style="padding:5px 8px;text-align:right;color:{kg_col};'
-                            f'font-size:0.8rem">{float(row["quantity_kg"]):,.1f}</td>'
-                            f'</tr>'
-                        )
                     st.markdown(
                         f'<table style="width:100%;border-collapse:collapse;margin-bottom:0.8rem">'
                         f'<thead><tr style="border-bottom:1px solid #252318">'
@@ -665,7 +720,7 @@ elif st.session_state.stock_page == "category":
             other_locs = [l for l in LOCATIONS if l != from_loc]
 
             with st.form(f"transfer_form_{from_loc}", clear_on_submit=True):
-                tf1, tf2, tf3 = st.columns(3)
+                tf1, tf2, tf3, tf4 = st.columns(4)
                 with tf1:
                     sel_good = st.selectbox(
                         "Good", good_names,
@@ -675,20 +730,25 @@ elif st.session_state.stock_page == "category":
                         "To Location", other_locs,
                         key=f"tf_to_{from_loc}")
                 with tf3:
+                    tf_batch = st.text_input(
+                        "Batch (blank = unassigned)",
+                        placeholder="e.g. Batch #001",
+                        key=f"tf_batch_{from_loc}")
+                with tf4:
                     transfer_date = st.date_input(
                         "Transfer Date", value=date.today(),
                         key=f"tf_date_{from_loc}")
 
-                tf4, tf5, tf6 = st.columns(3)
-                with tf4:
+                tf5, tf6, tf7 = st.columns(3)
+                with tf5:
                     bags_mv = st.number_input(
                         "Bags to Transfer", min_value=0, step=1,
                         key=f"tf_bags_{from_loc}")
-                with tf5:
+                with tf6:
                     kg_mv = st.number_input(
                         "Kg to Transfer", min_value=0.0, step=0.1,
                         format="%.2f", key=f"tf_kg_{from_loc}")
-                with tf6:
+                with tf7:
                     tf_note = st.text_input(
                         "Note (optional)", key=f"tf_note_{from_loc}")
 
@@ -708,7 +768,8 @@ elif st.session_state.stock_page == "category":
                     if bags_mv == 0 and kg_mv == 0.0:
                         st.error("Enter at least bags or Kg to transfer.")
                     else:
-                        gid = good_ids[good_names.index(sel_good)]
+                        gid          = good_ids[good_names.index(sel_good)]
+                        batch_label  = tf_batch.strip()
                         _src_row = conn.execute("""
                             SELECT sl.bags, sl.quantity_kg,
                                    sg.good_name, sc.category_name
@@ -716,11 +777,12 @@ elif st.session_state.stock_page == "category":
                             JOIN stock_goods sg ON sl.good_id = sg.good_id
                             JOIN stock_categories sc ON sg.category_id = sc.category_id
                             WHERE sl.good_id = %s AND sl.location = %s
-                        """, (gid, from_loc)).fetchone()
+                              AND sl.batch_label = %s
+                        """, (gid, from_loc, batch_label)).fetchone()
                         _dst_row = conn.execute(
                             "SELECT bags, quantity_kg FROM stock_levels "
-                            "WHERE good_id=%s AND location=%s",
-                            (gid, to_loc)).fetchone()
+                            "WHERE good_id=%s AND location=%s AND batch_label=%s",
+                            (gid, to_loc, batch_label)).fetchone()
                         cur_bags = int(_src_row["bags"] or 0) if _src_row else 0
                         cur_kg   = float(_src_row["quantity_kg"] or 0) if _src_row else 0.0
                         _src_bags_before = cur_bags
@@ -744,17 +806,21 @@ elif st.session_state.stock_page == "category":
                             for e in errs:
                                 st.error(e)
                         else:
+                            _log_sfx = f" [Batch: {batch_label}]" if batch_label else ""
                             with conn:
                                 conn.execute(
                                     "UPDATE stock_levels "
                                     "SET bags=bags-%s, quantity_kg=quantity_kg-%s "
-                                    "WHERE good_id=%s AND location=%s",
-                                    (bags_mv, kg_mv, gid, from_loc))
-                                conn.execute(
-                                    "UPDATE stock_levels "
-                                    "SET bags=bags+%s, quantity_kg=quantity_kg+%s "
-                                    "WHERE good_id=%s AND location=%s",
-                                    (bags_mv, kg_mv, gid, to_loc))
+                                    "WHERE good_id=%s AND location=%s AND batch_label=%s",
+                                    (bags_mv, kg_mv, gid, from_loc, batch_label))
+                                conn.execute("""
+                                    INSERT INTO stock_levels
+                                        (good_id, location, batch_label, bags, quantity_kg)
+                                    VALUES (%s, %s, %s, %s, %s)
+                                    ON CONFLICT (good_id, location, batch_label) DO UPDATE
+                                        SET bags        = stock_levels.bags        + excluded.bags,
+                                            quantity_kg = stock_levels.quantity_kg + excluded.quantity_kg
+                                """, (gid, to_loc, batch_label, bags_mv, kg_mv))
                                 conn.execute(
                                     "INSERT INTO stock_transfers "
                                     "(transfer_date,good_id,from_location,to_location,"
@@ -767,23 +833,24 @@ elif st.session_state.stock_page == "category":
                                         "Transfer Out",
                                         _src_bags_before, _src_bags_before - bags_mv,
                                         _src_kg_before,   _src_kg_before   - kg_mv,
-                                        source=f"Transferred to {to_loc}"
+                                        source=f"Transferred to {to_loc}{_log_sfx}"
                                     )
                                     log_stock_change(
                                         conn, _cat_name, _good_name, to_loc,
                                         "Transfer In",
                                         _dst_bags_before, _dst_bags_before + bags_mv,
                                         _dst_kg_before,   _dst_kg_before   + kg_mv,
-                                        source=f"Transferred from {from_loc}"
+                                        source=f"Transferred from {from_loc}{_log_sfx}"
                                     )
                                 except Exception as _e:
                                     import logging
                                     logging.getLogger(__name__).warning(
                                         "stock_history log failed: %s", _e)
                             st.session_state.stock_transfer_loc = None
+                            _batch_note = f" (Batch: {batch_label})" if batch_label else ""
                             st.success(
                                 f"✓ Transferred {bags_mv:,} bags & {kg_mv:,.1f} Kg of "
-                                f"**{sel_good}** from {from_loc} → {to_loc}.")
+                                f"**{sel_good}**{_batch_note} from {from_loc} → {to_loc}.")
                             st.rerun()
 
         # ── LEVEL 3B: UPDATE FORM ────────────────────────────────
@@ -833,29 +900,77 @@ elif st.session_state.stock_page == "category":
                             unsafe_allow_html=True)
 
                     upd_vals = {}
-                    for _, row in df_upd.iterrows():
-                        gid = int(row["good_id"])
-                        is_neg_row = int(row["bags"]) < 0 or float(row["quantity_kg"]) < 0
-                        name_color = "#ff8080" if is_neg_row else "#c8bfa8"
-                        rc1, rc2, rc3 = st.columns([4, 2, 2])
-                        with rc1:
+                    for (gid, gname), _grp in df_upd.groupby(
+                            ['good_id', 'good_name'], sort=False):
+                        gid    = int(gid)
+                        _named = _grp[_grp['batch_label'] != '']
+
+                        if _named.empty:
+                            # No batches — single row (existing style)
+                            row        = _grp.iloc[0]
+                            is_neg_row = int(row["bags"]) < 0 or float(row["quantity_kg"]) < 0
+                            name_color = "#ff8080" if is_neg_row else "#c8bfa8"
+                            rc1, rc2, rc3 = st.columns([4, 2, 2])
+                            with rc1:
+                                st.markdown(
+                                    f'<div style="padding:0.45rem 0;font-size:0.88rem;'
+                                    f'color:{name_color}">{h(gname)}</div>',
+                                    unsafe_allow_html=True)
+                            with rc2:
+                                new_bags = st.number_input(
+                                    "", value=int(row["bags"]), step=1,
+                                    key=f"upd_bags_{upd_loc}_{gid}_",
+                                    label_visibility="collapsed")
+                            with rc3:
+                                new_kg = st.number_input(
+                                    "", value=float(row["quantity_kg"]),
+                                    step=0.1, format="%.2f",
+                                    key=f"upd_kg_{upd_loc}_{gid}_",
+                                    label_visibility="collapsed")
+                            upd_vals[(gid, '')] = (new_bags, new_kg)
+                        else:
+                            # Group header
+                            _agg_b     = _grp['bags'].sum()
+                            _is_hdr_neg = _agg_b < 0 or _grp['quantity_kg'].sum() < 0
+                            _hdr_color  = "#ff8080" if _is_hdr_neg else "#e8c97e"
                             st.markdown(
-                                f'<div style="padding:0.45rem 0;font-size:0.88rem;'
-                                f'color:{name_color}">{h(row["good_name"])}</div>',
+                                f'<div style="padding:0.35rem 0 0.1rem 0;font-size:0.88rem;'
+                                f'font-weight:700;color:{_hdr_color}">{h(gname)}</div>',
                                 unsafe_allow_html=True)
-                        with rc2:
-                            # No min_value so pre-filled negative values render without error
-                            new_bags = st.number_input(
-                                "", value=int(row["bags"]), step=1,
-                                key=f"upd_bags_{upd_loc}_{gid}",
-                                label_visibility="collapsed")
-                        with rc3:
-                            new_kg = st.number_input(
-                                "", value=float(row["quantity_kg"]),
-                                step=0.1, format="%.2f",
-                                key=f"upd_kg_{upd_loc}_{gid}",
-                                label_visibility="collapsed")
-                        upd_vals[gid] = (new_bags, new_kg)
+                            for _, brow in _grp.iterrows():
+                                blabel  = str(brow['batch_label'])
+                                bnotes  = str(brow['batch_notes'] or '')
+                                dlabel  = blabel if blabel else 'Default'
+                                is_neg_row = int(brow["bags"]) < 0 or float(brow["quantity_kg"]) < 0
+                                name_color = "#ff8080" if is_neg_row else "#9a9080"
+                                rc1, rc2, rc3 = st.columns([4, 2, 2])
+                                with rc1:
+                                    _lhtml = (
+                                        f'<div style="padding:0.3rem 0 0 1rem;'
+                                        f'font-size:0.82rem;color:{name_color}">'
+                                        f'↳ {h(dlabel)}</div>'
+                                    )
+                                    if bnotes:
+                                        _lhtml += (
+                                            f'<div style="padding:0 0 0.3rem 1.6rem;'
+                                            f'font-size:0.7rem;color:#4a4438;'
+                                            f'font-style:italic">{h(bnotes)}</div>'
+                                        )
+                                    st.markdown(_lhtml, unsafe_allow_html=True)
+                                _sk = (blabel.replace(" ", "_").replace("#", "n")
+                                       if blabel else "default")
+                                with rc2:
+                                    new_bags = st.number_input(
+                                        "", value=int(brow["bags"]), step=1,
+                                        key=f"upd_bags_{upd_loc}_{gid}_{_sk}",
+                                        label_visibility="collapsed")
+                                with rc3:
+                                    new_kg = st.number_input(
+                                        "", value=float(brow["quantity_kg"]),
+                                        step=0.1, format="%.2f",
+                                        key=f"upd_kg_{upd_loc}_{gid}_{_sk}",
+                                        label_visibility="collapsed")
+                                upd_vals[(gid, blabel)] = (new_bags, new_kg)
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     sv1, sv2 = st.columns(2)
@@ -872,7 +987,7 @@ elif st.session_state.stock_page == "category":
 
                     if save_clicked:
                         with conn:
-                            for gid, (nb, nk) in upd_vals.items():
+                            for (gid, blabel), (nb, nk) in upd_vals.items():
                                 _before_row = conn.execute("""
                                     SELECT sl.bags, sl.quantity_kg,
                                            sg.good_name, sc.category_name
@@ -880,24 +995,27 @@ elif st.session_state.stock_page == "category":
                                     JOIN stock_goods sg ON sl.good_id = sg.good_id
                                     JOIN stock_categories sc ON sg.category_id = sc.category_id
                                     WHERE sl.good_id = %s AND sl.location = %s
-                                """, (gid, upd_loc)).fetchone()
+                                      AND sl.batch_label = %s
+                                """, (gid, upd_loc, blabel)).fetchone()
                                 _b_bags = float(_before_row["bags"] or 0) if _before_row else 0
                                 _b_kg   = float(_before_row["quantity_kg"] or 0) if _before_row else 0.0
                                 _a_bags = float(nb)
                                 _a_kg   = float(nk)
                                 conn.execute(
                                     "UPDATE stock_levels SET bags=%s, quantity_kg=%s "
-                                    "WHERE good_id=%s AND location=%s",
-                                    (nb, nk, gid, upd_loc))
+                                    "WHERE good_id=%s AND location=%s AND batch_label=%s",
+                                    (nb, nk, gid, upd_loc, blabel))
                                 if abs(_b_bags - _a_bags) > 0.001 or abs(_b_kg - _a_kg) > 0.001:
                                     try:
+                                        _log_src = (f"Manual update [Batch: {blabel}]"
+                                                    if blabel else "Manual update")
                                         log_stock_change(
                                             conn,
                                             _before_row["category_name"] if _before_row else "",
                                             _before_row["good_name"] if _before_row else "",
                                             upd_loc, "Update",
                                             _b_bags, _a_bags, _b_kg, _a_kg,
-                                            source="Manual update"
+                                            source=_log_src
                                         )
                                     except Exception as _e:
                                         import logging
@@ -928,6 +1046,58 @@ elif st.session_state.stock_page == "category":
                     conn.commit()
                     st.success(f"✓ All negative values at {upd_loc} reset to 0.")
                     st.rerun()
+
+            # ── Add Batch to existing good ────────────────────────
+            if goods:
+                st.markdown(
+                    f'<div style="font-size:0.82rem;color:#5a5448;font-weight:600;'
+                    f'margin:1rem 0 0.5rem 0;text-transform:uppercase;letter-spacing:0.08em">'
+                    f'＋ Add Batch to Existing Good at {h(upd_loc)}</div>',
+                    unsafe_allow_html=True)
+                _ab_cols = st.columns(min(len(goods), 3))
+                for _ab_i, _ab_g in enumerate(goods):
+                    _ab_gid   = _ab_g["good_id"]
+                    _ab_gname = _ab_g["good_name"]
+                    with _ab_cols[_ab_i % len(_ab_cols)]:
+                        with st.popover(f"＋ {_ab_gname}", use_container_width=True):
+                            with st.form(f"add_batch_{upd_loc}_{_ab_gid}"):
+                                ab_label = st.text_input(
+                                    "Batch Label *",
+                                    placeholder="e.g. Batch #001 or Oct-24 Kerala",
+                                    key=f"ab_label_{upd_loc}_{_ab_gid}")
+                                ab_notes = st.text_input(
+                                    "Notes (optional)",
+                                    placeholder="e.g. High moisture, store separately",
+                                    key=f"ab_notes_{upd_loc}_{_ab_gid}")
+                                ab_bags = st.number_input(
+                                    "Bags", min_value=0, step=1,
+                                    key=f"ab_bags_{upd_loc}_{_ab_gid}")
+                                ab_kg = st.number_input(
+                                    "Weight (Kg)", min_value=0.0, step=0.1,
+                                    format="%.2f",
+                                    key=f"ab_kg_{upd_loc}_{_ab_gid}")
+                                if st.form_submit_button(
+                                        "＋ Add Batch", use_container_width=True):
+                                    _blabel = ab_label.strip()
+                                    if not _blabel:
+                                        st.error("Batch label is required.")
+                                    else:
+                                        try:
+                                            conn.execute(
+                                                "INSERT INTO stock_levels "
+                                                "(good_id, location, batch_label, "
+                                                " batch_notes, bags, quantity_kg) "
+                                                "VALUES (%s,%s,%s,%s,%s,%s)",
+                                                (_ab_gid, upd_loc, _blabel,
+                                                 ab_notes.strip() or None,
+                                                 int(ab_bags), float(ab_kg)))
+                                            conn.commit()
+                                            st.success(f"✓ Batch '{_blabel}' added.")
+                                            st.rerun()
+                                        except psycopg2.errors.UniqueViolation:
+                                            st.error(
+                                                f"'{_blabel}' already exists for "
+                                                f"this good at {upd_loc}.")
 
             # ── Add New Good sub-form ─────────────────────────────
             st.markdown(
@@ -996,7 +1166,8 @@ elif st.session_state.stock_page == "category":
                             for loc_n, (b, k) in loc_init.items():
                                 conn.execute(
                                     "INSERT INTO stock_levels "
-                                    "(good_id, location, bags, quantity_kg) VALUES (%s,%s,%s,%s)",
+                                    "(good_id, location, batch_label, bags, quantity_kg) "
+                                    "VALUES (%s,%s,'',%s,%s)",
                                     (new_gid, loc_n, b, k))
                             conn.commit()
                             st.success(f"✓ Added '{gname}' to {cat_name}.")
