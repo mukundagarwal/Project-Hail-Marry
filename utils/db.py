@@ -431,7 +431,7 @@ def ensure_schema(conn=None):
 
     try:
         _today_iso = _date.today().isoformat()
-        _STOCK_LOCATIONS = ["Transport", "Shop", "Anandpuri"]
+        _STOCK_LOCATIONS = ["Transport", "Shop", "Anandpuri", "Cold"]
         _STOCK_SEEDS = {
             "Arecanut":     ARECA_NUT_GOODS,
             "Black Pepper": BLACK_PEPPER_GOODS,
@@ -638,7 +638,7 @@ def purge_old_stock_history(conn) -> None:
 
 
 def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str) -> list:
-    _VALID_LOCS = {"Transport", "Shop", "Anandpuri"}
+    _VALID_LOCS = {"Transport", "Shop", "Anandpuri", "Cold"}
     warnings = []
 
     for it in bill_items:

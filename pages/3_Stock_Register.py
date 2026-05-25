@@ -13,12 +13,13 @@ from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.formatters import h, fmt_inr
 from utils.auth import require_login, render_logout_button
 
-LOCATIONS = ["Transport", "Shop", "Anandpuri"]
+LOCATIONS = ["Transport", "Shop", "Anandpuri", "Cold"]
 
 LOC_ACCENT = {
     "Transport": {"color": "#d4864a", "bg": "#1e1208", "border": "#4a2800"},
     "Shop":      {"color": "#8dd87a", "bg": "#0d1209", "border": "#1e3018"},
     "Anandpuri": {"color": "#6a9fd4", "bg": "#0d1118", "border": "#1e2840"},
+    "Cold":      {"color": "#7dd4e8", "bg": "#080e14", "border": "#1a3040"},
 }
 
 # ── Page config ─────────────────────────────────────────────────
@@ -162,7 +163,7 @@ if st.session_state.stock_page == "home":
                                     "INSERT INTO stock_categories (category_name) VALUES (%s) "
                                     "RETURNING category_id", (name,))
                                 _c2_id = _c2_row.fetchone()["category_id"]
-                                for _loc in ["Transport", "Shop", "Anandpuri"]:
+                                for _loc in LOCATIONS:
                                     c2.execute(
                                         "INSERT INTO unidentified_stock "
                                         "(category_id, location, bags, quantity_kg) VALUES (%s,%s,0,0)",
@@ -362,9 +363,9 @@ elif st.session_state.stock_page == "category":
                 unsafe_allow_html=True)
 
         # ── 3 location panels ────────────────────────────────────
-        lc1, lc2, lc3 = st.columns(3, gap="medium")
+        lc1, lc2, lc3, lc4 = st.columns(4, gap="medium")
 
-        for col_widget, loc in zip([lc1, lc2, lc3], LOCATIONS):
+        for col_widget, loc in zip([lc1, lc2, lc3, lc4], LOCATIONS):
             acc    = LOC_ACCENT[loc]
             df_loc = df_levels[df_levels["location"] == loc]
             total_bags_loc = int(df_loc["bags"].sum())
@@ -936,7 +937,7 @@ elif st.session_state.stock_page == "category":
                 unsafe_allow_html=True)
 
             with st.form(f"add_good_form_{upd_loc}"):
-                ag1, ag2, ag3, ag4 = st.columns([3, 1.5, 1.5, 1.5])
+                ag1, ag2, ag3, ag4, ag5 = st.columns([3, 1.5, 1.5, 1.5, 1.5])
                 with ag1:
                     new_good_name = st.text_input(
                         "Good Name", key=f"ag_name_{upd_loc}")
@@ -952,20 +953,28 @@ elif st.session_state.stock_page == "category":
                     ag_bags_a = st.number_input(
                         "Anandpuri Bags", min_value=0, step=1,
                         key=f"ag_ba_{upd_loc}")
-
-                ag5, ag6, ag7, _ = st.columns([1.5, 1.5, 1.5, 3])
                 with ag5:
+                    ag_bags_c = st.number_input(
+                        "Cold Bags", min_value=0, step=1,
+                        key=f"ag_bc_{upd_loc}")
+
+                ag6, ag7, ag8, ag9, _ = st.columns([1.5, 1.5, 1.5, 1.5, 1.5])
+                with ag6:
                     ag_kg_t = st.number_input(
                         "Transport Kg", min_value=0.0, step=0.1,
                         format="%.2f", key=f"ag_kt_{upd_loc}")
-                with ag6:
+                with ag7:
                     ag_kg_s = st.number_input(
                         "Shop Kg", min_value=0.0, step=0.1,
                         format="%.2f", key=f"ag_ks_{upd_loc}")
-                with ag7:
+                with ag8:
                     ag_kg_a = st.number_input(
                         "Anandpuri Kg", min_value=0.0, step=0.1,
                         format="%.2f", key=f"ag_ka_{upd_loc}")
+                with ag9:
+                    ag_kg_c = st.number_input(
+                        "Cold Kg", min_value=0.0, step=0.1,
+                        format="%.2f", key=f"ag_kc_{upd_loc}")
 
                 if st.form_submit_button("＋ Add Good", use_container_width=False):
                     gname = new_good_name.strip()
@@ -982,6 +991,7 @@ elif st.session_state.stock_page == "category":
                                 "Transport": (ag_bags_t, ag_kg_t),
                                 "Shop":      (ag_bags_s, ag_kg_s),
                                 "Anandpuri": (ag_bags_a, ag_kg_a),
+                                "Cold":      (ag_bags_c, ag_kg_c),
                             }
                             for loc_n, (b, k) in loc_init.items():
                                 conn.execute(
