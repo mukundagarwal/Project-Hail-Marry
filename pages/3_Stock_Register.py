@@ -460,8 +460,11 @@ elif st.session_state.stock_page == "category":
                                         _unid_bags, float(_new_ubags),
                                         _unid_kg,   float(_new_ukg),
                                         source="Manual update")
-                                except Exception:
-                                    pass
+                                except Exception as _slh_e:
+                                    import logging
+                                    logging.getLogger(__name__).warning(
+                                        "stock_history log failed for unidentified stock update: %s",
+                                        _slh_e)
                                 conn.execute("""
                                     UPDATE unidentified_stock
                                        SET bags = %s, quantity_kg = %s, notes = %s

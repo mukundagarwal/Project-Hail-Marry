@@ -425,6 +425,15 @@ def _sqlite_ddl(conn):
     ]
     for stmt in stmts:
         conn.execute(stmt)
+    # Partial unique indexes (enforce idempotency for opening balance rows)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_passbook_opening_per_firm
+        ON passbook_entries (firm) WHERE source_type = 'Opening'
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_cih_opening
+        ON cash_in_hand_entries (source_type) WHERE source_type = 'CIHOpening'
+    """)
     conn.commit()
 
 
@@ -496,6 +505,14 @@ def ensure_schema(conn=None):
                                    OR from_location != to_location);
                     END IF;
                 END $$
+            """)
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_passbook_opening_per_firm
+                ON passbook_entries (firm) WHERE source_type = 'Opening'
+            """)
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_cih_opening
+                ON cash_in_hand_entries (source_type) WHERE source_type = 'CIHOpening'
             """)
             conn.commit()
 

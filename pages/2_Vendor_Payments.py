@@ -434,30 +434,30 @@ def _edit_form(entry_row, conn):
                 _p = st.session_state.pop(_confirm_key)
                 # Old bill always had identified good (confirmation only triggered for MODE A)
                 _gid_old = int(entry_row["good_id"])
-                warn = reverse_bill_stock(
-                    conn, _gid_old,
-                    int(entry_row["bags"]), float(entry_row["quantity_kg"]))
-                _sa_mode = _p.get("new_mode", "A")
-                if _sa_mode == "A":
+                with conn:
+                    warn = reverse_bill_stock(
+                        conn, _gid_old,
+                        int(entry_row["bags"]), float(entry_row["quantity_kg"]))
+                    _sa_mode = _p.get("new_mode", "A")
+                    if _sa_mode == "A":
+                        conn.execute(
+                            "UPDATE stock_levels SET bags=bags+%s, quantity_kg=quantity_kg+%s "
+                            "WHERE good_id=%s AND location='Transport'",
+                            (_p["new_bags"], _p["new_kg"], _p["new_good_id"]))
+                    elif _sa_mode == "B":
+                        _nc_id = _p.get("new_cat_id")
+                        if _nc_id:
+                            add_unidentified_stock(
+                                conn, _nc_id, "Transport",
+                                float(_p["new_bags"]), float(_p["new_kg"]))
+                    # MODE C: no stock update
                     conn.execute(
-                        "UPDATE stock_levels SET bags=bags+%s, quantity_kg=quantity_kg+%s "
-                        "WHERE good_id=%s AND location='Transport'",
-                        (_p["new_bags"], _p["new_kg"], _p["new_good_id"]))
-                elif _sa_mode == "B":
-                    _nc_id = _p.get("new_cat_id")
-                    if _nc_id:
-                        add_unidentified_stock(
-                            conn, _nc_id, "Transport",
-                            float(_p["new_bags"]), float(_p["new_kg"]))
-                # MODE C: no stock update
-                conn.execute(
-                    "UPDATE vendor_entries "
-                    "SET entry_date=%s,particulars=%s,amount=%s,"
-                    "good_id=%s,bags=%s,quantity_kg=%s,firm=%s,note=%s WHERE entry_id=%s",
-                    (_p["new_date"], _p["new_cat_name"], _p["new_amt_neg"],
-                     _p["new_good_id"], _p["new_bags"], _p["new_kg"],
-                     _p["new_firm"], _p.get("new_note", ""), entry_id))
-                conn.commit()
+                        "UPDATE vendor_entries "
+                        "SET entry_date=%s,particulars=%s,amount=%s,"
+                        "good_id=%s,bags=%s,quantity_kg=%s,firm=%s,note=%s WHERE entry_id=%s",
+                        (_p["new_date"], _p["new_cat_name"], _p["new_amt_neg"],
+                         _p["new_good_id"], _p["new_bags"], _p["new_kg"],
+                         _p["new_firm"], _p.get("new_note", ""), entry_id))
                 st.session_state[f"vp_edit_{entry_id}"] = False
                 if warn:
                     st.warning(warn)
@@ -634,49 +634,49 @@ def _edit_form(entry_row, conn):
                     if not _do_confirm:
                         _new_part = new_cat_name or _old_particulars
 
-                        # Reverse old stock effect
-                        if _old_good_id_val is not None:
-                            warn = reverse_bill_stock(
-                                conn, int(_old_good_id_val), _old_bags, _old_kg)
-                        elif _old_bags > 0:
-                            # Old bill was MODE B — reverse unidentified stock
-                            _oc_row = conn.execute(
-                                "SELECT category_id FROM stock_categories "
-                                "WHERE category_name=%s",
-                                (_old_particulars,)).fetchone()
-                            if _oc_row:
-                                reverse_unidentified_stock(
-                                    conn, _oc_row["category_id"], "Transport",
-                                    float(_old_bags), _old_kg)
-                            warn = None
-                        else:
-                            warn = None
+                        with conn:
+                            # Reverse old stock effect
+                            if _old_good_id_val is not None:
+                                warn = reverse_bill_stock(
+                                    conn, int(_old_good_id_val), _old_bags, _old_kg)
+                            elif _old_bags > 0:
+                                # Old bill was MODE B — reverse unidentified stock
+                                _oc_row = conn.execute(
+                                    "SELECT category_id FROM stock_categories "
+                                    "WHERE category_name=%s",
+                                    (_old_particulars,)).fetchone()
+                                if _oc_row:
+                                    reverse_unidentified_stock(
+                                        conn, _oc_row["category_id"], "Transport",
+                                        float(_old_bags), _old_kg)
+                                warn = None
+                            else:
+                                warn = None
 
-                        # Apply new stock effect
-                        if _edit_new_mode == "A":
+                            # Apply new stock effect
+                            if _edit_new_mode == "A":
+                                conn.execute(
+                                    "UPDATE stock_levels "
+                                    "SET bags=bags+%s, quantity_kg=quantity_kg+%s "
+                                    "WHERE good_id=%s AND location='Transport'",
+                                    (int(new_bags), float(new_kg), new_good_id))
+                            elif _edit_new_mode == "B":
+                                _nc_row = conn.execute(
+                                    "SELECT category_id FROM stock_categories "
+                                    "WHERE category_name=%s",
+                                    (_new_part,)).fetchone()
+                                if _nc_row:
+                                    add_unidentified_stock(
+                                        conn, _nc_row["category_id"], "Transport",
+                                        float(new_bags), float(new_kg))
+
                             conn.execute(
-                                "UPDATE stock_levels "
-                                "SET bags=bags+%s, quantity_kg=quantity_kg+%s "
-                                "WHERE good_id=%s AND location='Transport'",
-                                (int(new_bags), float(new_kg), new_good_id))
-                        elif _edit_new_mode == "B":
-                            _nc_row = conn.execute(
-                                "SELECT category_id FROM stock_categories "
-                                "WHERE category_name=%s",
-                                (_new_part,)).fetchone()
-                            if _nc_row:
-                                add_unidentified_stock(
-                                    conn, _nc_row["category_id"], "Transport",
-                                    float(new_bags), float(new_kg))
-
-                        conn.execute(
-                            "UPDATE vendor_entries "
-                            "SET entry_date=%s,particulars=%s,amount=%s,"
-                            "good_id=%s,bags=%s,quantity_kg=%s,firm=%s,note=%s WHERE entry_id=%s",
-                            (str(new_date), _new_part, -new_amt,
-                             new_good_id, int(new_bags), float(new_kg),
-                             new_firm, edit_note.strip(), entry_id))
-                        conn.commit()
+                                "UPDATE vendor_entries "
+                                "SET entry_date=%s,particulars=%s,amount=%s,"
+                                "good_id=%s,bags=%s,quantity_kg=%s,firm=%s,note=%s WHERE entry_id=%s",
+                                (str(new_date), _new_part, -new_amt,
+                                 new_good_id, int(new_bags), float(new_kg),
+                                 new_firm, edit_note.strip(), entry_id))
                         st.session_state[f"vp_edit_{entry_id}"] = False
                         if warn:
                             st.warning(warn)
@@ -752,13 +752,10 @@ def _delete_confirm(entry_row, conn):
                         (SRC_VENDOR_RTGS, entry_id))
                 # ── CASH IN HAND SYNC ──────────────────────────────
                 if ek == "Payment" and entry_row.get("ledger_type") == "UB":
-                    try:
-                        conn.execute(
-                            "DELETE FROM cash_in_hand_entries "
-                            "WHERE source_type=%s AND source_id=%s",
-                            (SRC_VENDOR_UB, entry_id))
-                    except Exception:
-                        pass
+                    conn.execute(
+                        "DELETE FROM cash_in_hand_entries "
+                        "WHERE source_type=%s AND source_id=%s",
+                        (SRC_VENDOR_UB, entry_id))
                 conn.execute("DELETE FROM vendor_entries WHERE entry_id=%s", (entry_id,))
             st.session_state[f"vp_del_{entry_id}"] = False
             st.rerun()

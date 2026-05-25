@@ -447,14 +447,16 @@ elif st.session_state.pb_page == "firm":
                                 "opening_date=excluded.opening_date,"
                                 "notes=excluded.notes",
                                 (firm, _oa, str(ob_date), ob_note.strip()))
-                            conn.execute(
-                                "DELETE FROM passbook_entries "
-                                "WHERE firm=%s AND source_type=%s", (firm, SRC_OPENING))
-                            conn.execute(
-                                "INSERT INTO passbook_entries "
-                                "(firm,entry_date,details,amount,txn_type,source_type) "
-                                "VALUES (%s,%s,'Opening Balance',%s,%s,%s)",
-                                (firm, str(ob_date), abs(_oa), _otype, SRC_OPENING))
+                            conn.execute("""
+                                INSERT INTO passbook_entries
+                                    (firm, entry_date, details, amount, txn_type, source_type)
+                                VALUES (%s, %s, 'Opening Balance', %s, %s, %s)
+                                ON CONFLICT (firm) WHERE source_type = 'Opening'
+                                DO UPDATE SET
+                                    amount     = EXCLUDED.amount,
+                                    txn_type   = EXCLUDED.txn_type,
+                                    entry_date = EXCLUDED.entry_date
+                            """, (firm, str(ob_date), abs(_oa), _otype, SRC_OPENING))
                         st.session_state.pb_show_ob_form = False
                         st.toast("Opening balance updated.", icon="✓")
                         st.rerun()
@@ -1141,15 +1143,17 @@ elif st.session_state.pb_page == "cash":
                         "opening_date=excluded.opening_date,"
                         "notes=excluded.notes",
                         (_coa, str(cob_date), cob_note.strip()))
-                    conn.execute(
-                        "DELETE FROM cash_in_hand_entries WHERE source_type=%s",
-                        (SRC_CIH_OPENING,))
-                    conn.execute(
-                        "INSERT INTO cash_in_hand_entries "
-                        "(entry_date,details,amount,txn_type,source_type) "
-                        "VALUES (%s,%s,%s,%s,%s)",
-                        (str(cob_date), 'Opening Balance',
-                         abs(_coa), _cotype, SRC_CIH_OPENING))
+                    conn.execute("""
+                        INSERT INTO cash_in_hand_entries
+                            (entry_date, details, amount, txn_type, source_type)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (source_type) WHERE source_type = 'CIHOpening'
+                        DO UPDATE SET
+                            amount     = EXCLUDED.amount,
+                            txn_type   = EXCLUDED.txn_type,
+                            entry_date = EXCLUDED.entry_date
+                    """, (str(cob_date), 'Opening Balance',
+                          abs(_coa), _cotype, SRC_CIH_OPENING))
                 st.session_state.pb_show_cih_ob_form = False
                 st.toast("Opening balance updated.", icon="✓")
                 st.rerun()

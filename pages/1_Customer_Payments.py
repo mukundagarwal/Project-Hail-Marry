@@ -604,8 +604,7 @@ elif st.session_state.page == "ledger":
                                             _bill_sent_ok = False
 
                                     if _bill_sent_ok:
-                                        cur = conn.cursor()
-                                        cur.execute(
+                                        _txn_row = conn.execute(
                                             """INSERT INTO customer_transactions
                                             (broker_id,customer_name,date,type_of_goods,bags,quantity,rate,
                                              total_amount,payment_status,payment_method,
@@ -617,10 +616,10 @@ elif st.session_state.page == "ledger":
                                              total_bags, total_qty, 0, grand,
                                              st.session_state.bill_pstatus, None,
                                              None, None, None,
-                                             _bill_sent_save, 0.0))
-                                        txn_id = cur.fetchone()[0]
+                                             _bill_sent_save, 0.0)).fetchone()
+                                        txn_id = _txn_row["transaction_id"]
                                         for it in st.session_state.bill_items:
-                                            cur.execute(
+                                            conn.execute(
                                                 """INSERT INTO transaction_items
                                                 (transaction_id,type_of_goods,bags,bag_rate,
                                                  quantity,rate,freight,collection_point,line_total)
@@ -1869,7 +1868,9 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                                  "grace_days": gd_disp,
                                                                  "days_overdue": _days_overdue})
                                             # ── Passbook sync: settlement cheque ──
-                                            if sett_method == "Cheque" and _sv_chq_no and sett_dep_firm:
+                                            _pb_chq_amt = round(r["final_balance_due"], 2)
+                                            if (sett_method == "Cheque" and _sv_chq_no
+                                                    and sett_dep_firm and _pb_chq_amt > 0):
                                                 if _existing_pb:
                                                     conn.execute(
                                                         "UPDATE passbook_entries "
@@ -1879,7 +1880,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                         (sett_dep_firm,
                                                          _sv_chq_dt or str(date.today()),
                                                          _det4,
-                                                         round(r["final_balance_due"], 2),
+                                                         _pb_chq_amt,
                                                          _sv_chq_no, _existing_pb[0]))
                                                 else:
                                                     conn.execute(
@@ -1891,11 +1892,12 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                         (sett_dep_firm,
                                                          _sv_chq_dt or str(date.today()),
                                                          _det4,
-                                                         round(r["final_balance_due"], 2),
+                                                         _pb_chq_amt,
                                                          _sv_chq_no,
                                                          CHQ_PENDING,
                                                          SRC_CUST_CHQ_TXN, tid))
                                             else:
+                                                # Non-cheque method, or overpayment (balance <= 0)
                                                 conn.execute(
                                                     "DELETE FROM passbook_entries "
                                                     "WHERE source_type=%s AND source_id=%s",
@@ -1927,11 +1929,14 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                         tid
                                                     ))
                                             # ── END CASH IN HAND SYNC ────────────────────────────────
+                                        _overpay_note = ""
+                                        if round(r["final_balance_due"], 2) <= 0:
+                                            _overpay_note = " Overpayment — no passbook entry created (refund due to customer)."
                                         st.session_state[calc_key] = False
                                         st.session_state.pop(f"preview_{tid}", None)
                                         if tid in st.session_state.get("sum_intercept", []):
                                             st.session_state.sum_intercept.remove(tid)
-                                        st.success(f"✓ Settlement {fmt_inr(r['final_balance_due'])} saved.")
+                                        st.success(f"✓ Settlement {fmt_inr(r['final_balance_due'])} saved.{_overpay_note}")
                                         st.rerun()
                             with sc2:
                                 if st.button("Cancel", key=f"cancel_calc_{tid}", use_container_width=True):
