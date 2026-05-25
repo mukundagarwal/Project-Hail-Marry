@@ -26,7 +26,8 @@ def compute_passbook_view(firm: str, conn=None) -> pd.DataFrame:
       signed_amount, balance, balance_is_pending
 
     Pending cheques are excluded from the running balance; their
-    displayed balance is the hypothetical 'if-cleared' value.
+    displayed balance is the hypothetical 'if-cleared' value, computed
+    via a SQL window function (SUM OVER) for efficiency.
     When conn is provided it is used and NOT closed; when omitted
     the function opens and closes its own connection.
     """
@@ -35,10 +36,21 @@ def compute_passbook_view(firm: str, conn=None) -> pd.DataFrame:
         conn = get_conn()
     ph = _db_ph(conn)
     try:
-        rows = conn.execute(
-            f"SELECT * FROM passbook_entries WHERE firm={ph} "
-            f"ORDER BY entry_date ASC, entry_id ASC",
-            (firm,)).fetchall()
+        rows = conn.execute(f"""
+            SELECT *,
+                CASE WHEN txn_type = 'Credit' THEN amount ELSE -amount END
+                    AS signed_amount,
+                SUM(
+                    CASE WHEN (cheque_status IS NULL OR cheque_status != 'Pending')
+                         THEN CASE WHEN txn_type = 'Credit' THEN amount ELSE -amount END
+                         ELSE 0.0
+                    END
+                ) OVER (ORDER BY entry_date ASC, entry_id ASC
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                    AS _running_cleared
+            FROM passbook_entries WHERE firm = {ph}
+            ORDER BY entry_date ASC, entry_id ASC
+        """, (firm,)).fetchall()
     finally:
         if _own_conn:
             conn.close()
@@ -52,22 +64,15 @@ def compute_passbook_view(firm: str, conn=None) -> pd.DataFrame:
         return pd.DataFrame(columns=_empty_cols)
 
     df = pd.DataFrame([dict(r) for r in rows])
-    df["signed_amount"]      = df.apply(
-        lambda r: float(r["amount"]) if r["txn_type"] == "Credit"
-                  else -float(r["amount"]), axis=1)
     df["balance_is_pending"] = df["cheque_status"] == "Pending"
-
-    running  = 0.0
-    balances = []
-    for _, row in df.iterrows():
-        if row["balance_is_pending"]:
-            balances.append(round(running + row["signed_amount"], 2))
-        else:
-            running = round(running + row["signed_amount"], 2)
-            balances.append(running)
-
-    df["balance"] = balances
-    df["s_no"]    = range(1, len(df) + 1)
+    df["balance"] = df.apply(
+        lambda r: round(float(r["_running_cleared"]) + float(r["signed_amount"]), 2)
+                  if r["balance_is_pending"]
+                  else round(float(r["_running_cleared"]), 2),
+        axis=1,
+    )
+    df.drop(columns=["_running_cleared"], inplace=True)
+    df["s_no"] = range(1, len(df) + 1)
     return df.iloc[::-1].reset_index(drop=True)
 
 
@@ -77,6 +82,7 @@ def compute_cash_view(conn=None) -> pd.DataFrame:
       s_no, entry_id, entry_date, details, amount, txn_type,
       source_type, source_id, signed_amount, balance
 
+    Running balance computed via SQL window function (SUM OVER) for efficiency.
     When conn is provided it is used and NOT closed; when omitted
     the function opens and closes its own connection.
     """
@@ -84,9 +90,17 @@ def compute_cash_view(conn=None) -> pd.DataFrame:
     if _own_conn:
         conn = get_conn()
     try:
-        rows = conn.execute(
-            "SELECT * FROM cash_in_hand_entries "
-            "ORDER BY entry_date ASC, entry_id ASC").fetchall()
+        rows = conn.execute("""
+            SELECT *,
+                CASE WHEN txn_type = 'Credit' THEN amount ELSE -amount END
+                    AS signed_amount,
+                SUM(CASE WHEN txn_type = 'Credit' THEN amount ELSE -amount END)
+                    OVER (ORDER BY entry_date ASC, entry_id ASC
+                          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                    AS _running
+            FROM cash_in_hand_entries
+            ORDER BY entry_date ASC, entry_id ASC
+        """).fetchall()
     finally:
         if _own_conn:
             conn.close()
@@ -99,18 +113,9 @@ def compute_cash_view(conn=None) -> pd.DataFrame:
         return pd.DataFrame(columns=_empty_cols)
 
     df = pd.DataFrame([dict(r) for r in rows])
-    df["signed_amount"] = df.apply(
-        lambda r: float(r["amount"]) if r["txn_type"] == "Credit"
-                  else -float(r["amount"]), axis=1)
-
-    running  = 0.0
-    balances = []
-    for sa in df["signed_amount"]:
-        running = round(running + float(sa), 2)
-        balances.append(running)
-
-    df["balance"] = balances
-    df["s_no"]    = range(1, len(df) + 1)
+    df["balance"] = df["_running"].round(2)
+    df.drop(columns=["_running"], inplace=True)
+    df["s_no"] = range(1, len(df) + 1)
     return df.iloc[::-1].reset_index(drop=True)
 
 
@@ -223,10 +228,10 @@ def allocate_to_customer(conn, entry_id: int, customer_name: str,
     conn.execute(f"""
         INSERT INTO payments
           (transaction_id, payment_date, amount, method, note,
-           days_from_start, interest_charged)
-        VALUES ({ph}, {ph}, {ph}, 'Bank Transfer', {ph}, {ph}, 0)
+           days_from_start, interest_charged, passbook_entry_id)
+        VALUES ({ph}, {ph}, {ph}, 'Bank Transfer', {ph}, {ph}, 0, {ph})
     """, (tid, pb_date, pb_amount,
-          f"Auto-allocated from passbook #{entry_id}", d_from))
+          f"Auto-allocated from passbook #{entry_id}", d_from, entry_id))
 
     new_total = round(old_paid + pb_amount, 2)
     # NOTE: Never set to 'Paid' here, even on overpayment.
@@ -278,9 +283,8 @@ def _unlink_allocation(conn, entry_id: int) -> dict:
     if tid:
         tid = int(tid)
         pmt = conn.execute(
-            f"SELECT payment_id FROM payments "
-            f"WHERE  transaction_id = {ph} AND note LIKE {ph}",
-            (tid, f"Auto-allocated from passbook #{entry_id}%")).fetchone()
+            f"SELECT payment_id FROM payments WHERE passbook_entry_id = {ph}",
+            (entry_id,)).fetchone()
         if pmt:
             conn.execute(f"DELETE FROM payments WHERE payment_id={ph}", (pmt["payment_id"],))
 

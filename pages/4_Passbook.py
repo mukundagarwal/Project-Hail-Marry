@@ -797,9 +797,8 @@ elif st.session_state.pb_page == "firm":
                                         _a_tid = int(_a_tid)
                                         _pmt = conn.execute(
                                             "SELECT payment_id FROM payments "
-                                            "WHERE transaction_id=%s AND note LIKE %s",
-                                            (_a_tid,
-                                             f"Auto-allocated from passbook #{eid}%")
+                                            "WHERE passbook_entry_id=%s",
+                                            (eid,)
                                         ).fetchone()
                                         if _pmt:
                                             _bill_d = conn.execute(
@@ -921,9 +920,8 @@ elif st.session_state.pb_page == "firm":
                                         _d_tid = int(_d_tid)
                                         _d_pmt = conn.execute(
                                             "SELECT payment_id FROM payments "
-                                            "WHERE transaction_id=%s AND note LIKE %s",
-                                            (_d_tid,
-                                             f"Auto-allocated from passbook #{eid}%")
+                                            "WHERE passbook_entry_id=%s",
+                                            (eid,)
                                         ).fetchone()
                                         if _d_pmt:
                                             conn.execute(

@@ -138,3 +138,117 @@ def test_days_30_360():
     assert _days_30_360(date(2025, 1, 1), date(2026, 1, 1)) == 360
     # Start == End
     assert _days_30_360(date(2026, 1, 1), date(2026, 1, 1)) == 0
+
+
+# ── AUDIT-005: Interest waiver threshold is INCLUSIVE (<=) ──────────────
+
+
+def test_threshold_boundary_exactly_at(db):
+    """Remaining principal == 7.5% of bill → interest waived (inclusive boundary)."""
+    from utils.calculator import INTEREST_WAIVER_THRESHOLD_PCT
+    total = 10000
+    tid = _seed_transaction(db, total=total, bill_date="2026-01-01")
+    # 9250 paid within grace → remaining = 750.00 = exactly 7.5%
+    _add_payment(db, tid, 9250, "2026-01-10")
+    db.commit()
+
+    res = calculate_final_settlement(
+        tid, settlement_date=date(2026, 6, 1), grace_days=35, conn=db)
+
+    threshold = round(total * INTEREST_WAIVER_THRESHOLD_PCT / 100.0, 2)
+    assert res["remaining_principal"] == threshold
+    assert res["interest_waived"] is True
+    assert res["remaining_interest"] == 0.0
+
+
+def test_threshold_boundary_just_above(db):
+    """Remaining principal > 7.5% of bill → interest is NOT waived."""
+    total = 10000
+    tid = _seed_transaction(db, total=total, bill_date="2026-01-01")
+    # 9249.99 paid → remaining = 750.01 > 7.5%
+    _add_payment(db, tid, 9249.99, "2026-01-10")
+    db.commit()
+
+    res = calculate_final_settlement(
+        tid, settlement_date=date(2026, 6, 1), grace_days=35, conn=db)
+
+    assert res["interest_waived"] is False
+    assert res["remaining_interest"] > 0.0
+
+
+def test_threshold_boundary_just_below(db):
+    """Remaining principal < 7.5% of bill → interest is waived."""
+    total = 10000
+    tid = _seed_transaction(db, total=total, bill_date="2026-01-01")
+    # 9250.01 paid → remaining = 749.99 < 7.5%
+    _add_payment(db, tid, 9250.01, "2026-01-10")
+    db.commit()
+
+    res = calculate_final_settlement(
+        tid, settlement_date=date(2026, 6, 1), grace_days=35, conn=db)
+
+    assert res["interest_waived"] is True
+    assert res["remaining_interest"] == 0.0
+
+
+# ── AUDIT-007: ISDA 30/360 month-end rules ──────────────────────────────
+
+
+def test_isda_rule1_last_feb_start(db):
+    """ISDA Rule 1: last day of Feb as start → d1 treated as 30.
+    Feb 28 → Mar 28 (non-leap): plain 30/360 gives 30, ISDA gives 28."""
+    from utils.calculator import _days_30_360
+    # Without rule: (3-2)*30 + (28-28) = 30
+    # With rule 1:  d1=30 → (3-2)*30 + (28-30) = 28
+    assert _days_30_360(date(2026, 2, 28), date(2026, 3, 28)) == 28
+
+
+def test_isda_rule1_leap_year_last_feb_start(db):
+    """ISDA Rule 1 applies to Feb 29 in a leap year as start.
+    Feb 29 → Mar 29 (leap): plain gives 30, ISDA gives 29."""
+    from utils.calculator import _days_30_360
+    # Feb 2028 is leap (29 days). Without rule: 30 + (29-29) = 30
+    # With rule 1: d1=30 → 30 + (29-30) = 29
+    assert _days_30_360(date(2028, 2, 29), date(2028, 3, 29)) == 29
+
+
+def test_isda_rule2_both_last_feb(db):
+    """ISDA Rule 2: both start and end are last day of Feb → exactly 360 days."""
+    from utils.calculator import _days_30_360
+    # Feb 28, 2025 → Feb 28, 2026 (both last of Feb)
+    # Rule 1: d1=30. Rule 2: d2=30. Result = 360 + 0 + 0 = 360
+    assert _days_30_360(date(2025, 2, 28), date(2026, 2, 28)) == 360
+
+
+def test_isda_rule3_d1_31(db):
+    """ISDA Rule 3: start day = 31 → treated as 30.
+    Jan 31 → Feb 28: plain gives 27, ISDA gives 28."""
+    from utils.calculator import _days_30_360
+    # Without rule: (2-1)*30 + (28-31) = 30-3 = 27
+    # With rule 3: d1=30 → (2-1)*30 + (28-30) = 28
+    assert _days_30_360(date(2026, 1, 31), date(2026, 2, 28)) == 28
+
+
+def test_isda_rule4_d2_31_and_d1_30(db):
+    """ISDA Rule 4: end day = 31 AND adjusted start = 30 → end treated as 30.
+    Jan 30 → Mar 31: plain gives 61, ISDA gives 60."""
+    from utils.calculator import _days_30_360
+    # d1=30 (naturally), d2=31, d1=30 → d2=30
+    # Without rule 4: 2*30 + (31-30) = 61
+    # With rule 4:    2*30 + (30-30) = 60
+    assert _days_30_360(date(2026, 1, 30), date(2026, 3, 31)) == 60
+
+
+def test_isda_rule4_via_rule3_then_rule4(db):
+    """Rules 3+4 chain: Jan 31 → Mar 31 → d1 goes 31→30, then d2 goes 31→30."""
+    from utils.calculator import _days_30_360
+    # Rule 3: d1=30. Rule 4: d2=30.
+    # Result = 2*30 + (30-30) = 60
+    assert _days_30_360(date(2026, 1, 31), date(2026, 3, 31)) == 60
+
+
+def test_days_30_360_end_before_start_returns_zero(db):
+    """end <= start always returns 0 (no negative day counts)."""
+    from utils.calculator import _days_30_360
+    assert _days_30_360(date(2026, 3, 1), date(2026, 1, 1)) == 0
+    assert _days_30_360(date(2026, 1, 1), date(2026, 1, 1)) == 0

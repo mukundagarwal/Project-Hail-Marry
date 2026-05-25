@@ -949,6 +949,28 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                 '</div>',
                 unsafe_allow_html=True)
 
+            # ── Batch-fetch payments + items for all visible transactions ──
+            _page_tids = [int(r["transaction_id"]) for _, r in df_page.iterrows()]
+            if _page_tids:
+                _pg_phs = ",".join(["%s"] * len(_page_tids))
+                _all_pmts_page  = pg_read_sql(
+                    f"SELECT * FROM payments "
+                    f"WHERE transaction_id IN ({_pg_phs}) ORDER BY transaction_id, payment_date ASC",
+                    conn, params=tuple(_page_tids))
+                _all_items_page = pg_read_sql(
+                    f"SELECT * FROM transaction_items "
+                    f"WHERE transaction_id IN ({_pg_phs}) ORDER BY transaction_id, item_id ASC",
+                    conn, params=tuple(_page_tids))
+            else:
+                _all_pmts_page  = pd.DataFrame()
+                _all_items_page = pd.DataFrame()
+            _pmts_by_tid  = ({int(t): g.reset_index(drop=True)
+                              for t, g in _all_pmts_page.groupby("transaction_id")}
+                             if not _all_pmts_page.empty else {})
+            _items_by_tid = ({int(t): g.reset_index(drop=True)
+                              for t, g in _all_items_page.groupby("transaction_id")}
+                             if not _all_items_page.empty else {})
+
             # ── TRANSACTION ROWS ─────────────────────────────────
             for _, txn in df_page.iterrows():
                 tid         = int(txn["transaction_id"])
@@ -1039,9 +1061,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                 _exp_label = "▸  View / Edit"
                 with st.expander(_exp_label, expanded=False):
 
-                    df_items = pg_read_sql(
-                        "SELECT * FROM transaction_items WHERE transaction_id=%s ORDER BY item_id",
-                        conn, params=(tid,))
+                    df_items = _items_by_tid.get(tid, pd.DataFrame())
                     if not df_items.empty:
                         rows_i = ""
                         for _, it in df_items.iterrows():
@@ -1105,9 +1125,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                     st.markdown("---")
                     st.markdown("##### 📅 Payment Timeline")
 
-                    df_pmts = pg_read_sql(
-                        "SELECT * FROM payments WHERE transaction_id=%s ORDER BY payment_date ASC",
-                        conn, params=(tid,))
+                    df_pmts = _pmts_by_tid.get(tid, pd.DataFrame())
                     total_paid_so_far = float(df_pmts["amount"].sum()) if not df_pmts.empty else 0.0
 
                     if df_pmts.empty:

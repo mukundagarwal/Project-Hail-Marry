@@ -315,14 +315,15 @@ def _sqlite_ddl(conn):
             interest_amount   REAL NOT NULL DEFAULT 0
         )""",
         """CREATE TABLE IF NOT EXISTS payments (
-            payment_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-            transaction_id   INTEGER NOT NULL REFERENCES customer_transactions(transaction_id),
-            payment_date     TEXT NOT NULL,
-            amount           REAL NOT NULL,
-            method           TEXT NOT NULL DEFAULT 'Cash',
-            note             TEXT,
-            days_from_start  INTEGER NOT NULL DEFAULT 0,
-            interest_charged REAL NOT NULL DEFAULT 0
+            payment_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id     INTEGER NOT NULL REFERENCES customer_transactions(transaction_id),
+            payment_date       TEXT NOT NULL,
+            amount             REAL NOT NULL,
+            method             TEXT NOT NULL DEFAULT 'Cash',
+            note               TEXT,
+            days_from_start    INTEGER NOT NULL DEFAULT 0,
+            interest_charged   REAL NOT NULL DEFAULT 0,
+            passbook_entry_id  INTEGER
         )""",
         """CREATE TABLE IF NOT EXISTS vendors (
             vendor_id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -460,6 +461,19 @@ def _sqlite_ddl(conn):
         CREATE UNIQUE INDEX IF NOT EXISTS uq_cih_opening
         ON cash_in_hand_entries (source_type) WHERE source_type = 'CIHOpening'
     """)
+    # Performance indexes for source-based lookups
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_passbook_source
+        ON passbook_entries (source_type, source_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_cih_source
+        ON cash_in_hand_entries (source_type, source_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_payments_passbook_entry
+        ON payments (passbook_entry_id)
+    """)
     conn.commit()
 
 
@@ -539,6 +553,21 @@ def ensure_schema(conn=None):
             conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_cih_opening
                 ON cash_in_hand_entries (source_type) WHERE source_type = 'CIHOpening'
+            """)
+            conn.execute(
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS passbook_entry_id INTEGER"
+            )
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_passbook_source
+                ON passbook_entries (source_type, source_id)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_cih_source
+                ON cash_in_hand_entries (source_type, source_id)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_payments_passbook_entry
+                ON payments (passbook_entry_id)
             """)
             conn.commit()
 

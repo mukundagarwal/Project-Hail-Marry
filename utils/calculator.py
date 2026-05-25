@@ -7,23 +7,46 @@ from datetime import datetime, date, timedelta
 
 from utils.db import get_conn, INTEREST_RATE_PCT, _db_ph
 
+# Interest waiver threshold — when remaining principal is at or below this
+# fraction of the original bill, no interest is charged on the remainder.
+# Boundary is inclusive: exactly 7.5% qualifies for the waiver.
+INTEREST_WAIVER_THRESHOLD_PCT = 7.5
+
 
 def _days_30_360(start: date, end: date) -> int:
     """
-    Count days between two dates using the 30/360 day-count convention:
-      - Every month = 30 days
-      - Every year  = 360 days
+    ISDA 30/360 day-count convention with month-end adjustments.
 
-    Formula: (Y2-Y1)×360 + (M2-M1)×30 + (D2-D1)
+    Rules applied in order:
+      1. If start is the last day of February, treat start day as 30.
+      2. If end is also the last day of February AND start was too, treat end as 30.
+      3. If start day = 31, treat it as 30.
+      4. If end day = 31 AND adjusted start day = 30, treat end day as 30.
+
+    Formula after adjustments: (Y2-Y1)*360 + (M2-M1)*30 + (D2-D1)
     Returns 0 if end <= start.
     """
+    from calendar import monthrange
+
     if end <= start:
         return 0
-    return (
-        (end.year  - start.year)  * 360 +
-        (end.month - start.month) * 30  +
-        (end.day   - start.day)
-    )
+
+    d1, m1, y1 = start.day, start.month, start.year
+    d2, m2, y2 = end.day,   end.month,   end.year
+
+    def _last_feb(dt: date) -> bool:
+        return dt.month == 2 and dt.day == monthrange(dt.year, 2)[1]
+
+    if _last_feb(start):
+        d1 = 30
+    if _last_feb(end) and _last_feb(start):
+        d2 = 30
+    if d1 == 31:
+        d1 = 30
+    if d2 == 31 and d1 == 30:
+        d2 = 30
+
+    return (y2 - y1) * 360 + (m2 - m1) * 30 + (d2 - d1)
 
 
 def _interest_factor(start: date, end: date) -> float:
@@ -123,8 +146,8 @@ def calculate_final_settlement(transaction_id: int,
         # Remaining interest only covers the period from last payment to settlement
         _rem_increment      = max(remaining_int_days - prev_int_days, 0)
         _rem_factor         = _rem_increment / 360.0
-        _threshold          = round(total_bill * 0.075, 2)
-        if max(remaining_principal, 0) < _threshold:
+        _threshold          = round(total_bill * INTEREST_WAIVER_THRESHOLD_PCT / 100.0, 2)
+        if max(remaining_principal, 0) <= _threshold:
             remaining_interest = 0.0
             _interest_waived   = True
         else:
