@@ -242,7 +242,7 @@ elif st.session_state.pb_page == "firm":
     conn = get_conn()
     try:
         # ── Stats ──────────────────────────────────────────────
-        df_all   = compute_passbook_view(firm)
+        df_all   = compute_passbook_view(firm, conn=conn)
         non_pend = df_all[~df_all["balance_is_pending"]] if not df_all.empty else pd.DataFrame()
         balance  = float(non_pend.iloc[0]["balance"]) if not non_pend.empty else 0.0
         pend_sum = float(df_all.loc[df_all["balance_is_pending"], "amount"].sum()) if not df_all.empty else 0.0

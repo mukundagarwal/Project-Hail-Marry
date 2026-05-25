@@ -748,12 +748,15 @@ elif st.session_state.page == "ledger":
                 f'<th style="text-align:right;padding:6px">Interest</th><th style="text-align:right;padding:6px">Total Amount Due</th>'
                 f'</tr></thead><tbody>{rows_screen}</tbody></table>', unsafe_allow_html=True)
 
-            _ids_in     = ",".join(str(int(i)) for i in df_s["transaction_id"])
-            _df_all_pmts = pg_read_sql(
-                f"SELECT * FROM payments WHERE transaction_id IN ({_ids_in})"
-                f" ORDER BY payment_date ASC",
-                conn
-            ) if not df_s.empty else pd.DataFrame()
+            if not df_s.empty:
+                _tid_list    = [int(i) for i in df_s["transaction_id"]]
+                _tid_phs     = ",".join(["%s"] * len(_tid_list))
+                _df_all_pmts = pg_read_sql(
+                    f"SELECT * FROM payments WHERE transaction_id IN ({_tid_phs})"
+                    f" ORDER BY payment_date ASC",
+                    conn, params=tuple(_tid_list))
+            else:
+                _df_all_pmts = pd.DataFrame()
             _pmts_by_txn = (
                 {int(tid): grp.reset_index(drop=True)
                  for tid, grp in _df_all_pmts.groupby("transaction_id")}

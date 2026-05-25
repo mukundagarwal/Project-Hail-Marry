@@ -8,7 +8,10 @@ import psycopg2
 import pandas as pd
 from datetime import date
 
-from utils.db import get_conn, pg_read_sql, ensure_schema, log_stock_change, purge_old_stock_history
+from utils.db import (
+    get_conn, pg_read_sql, ensure_schema, log_stock_change, purge_old_stock_history,
+    invalidate_lookup_cache, ensure_good_at_all_locations, ensure_category_at_all_locations,
+)
 from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.formatters import h, fmt_inr
 from utils.auth import require_login, render_logout_button
@@ -159,17 +162,14 @@ if st.session_state.stock_page == "home":
                         else:
                             try:
                                 c2 = get_conn()
-                                _c2_row = c2.execute(
-                                    "INSERT INTO stock_categories (category_name) VALUES (%s) "
-                                    "RETURNING category_id", (name,))
-                                _c2_id = _c2_row.fetchone()["category_id"]
-                                for _loc in LOCATIONS:
-                                    c2.execute(
-                                        "INSERT INTO unidentified_stock "
-                                        "(category_id, location, bags, quantity_kg) VALUES (%s,%s,0,0)",
-                                        (_c2_id, _loc))
-                                c2.commit()
+                                with c2:
+                                    _c2_row = c2.execute(
+                                        "INSERT INTO stock_categories (category_name) VALUES (%s) "
+                                        "RETURNING category_id", (name,))
+                                    _c2_id = _c2_row.fetchone()["category_id"]
+                                    ensure_category_at_all_locations(c2, _c2_id)
                                 c2.close()
+                                invalidate_lookup_cache()
                                 st.toast(f"Category '{name}' added.", icon="✓")
                                 st.rerun()
                             except psycopg2.errors.UniqueViolation:
@@ -1287,24 +1287,25 @@ elif st.session_state.stock_page == "category":
                         st.error("Good name cannot be empty.")
                     else:
                         try:
-                            cur = conn.execute(
-                                "INSERT INTO stock_goods (category_id, good_name) VALUES (%s,%s) "
-                                "RETURNING good_id",
-                                (cat_id, gname))
-                            new_gid = cur.fetchone()["good_id"]
-                            loc_init = {
-                                "Transport": (ag_bags_t, ag_kg_t),
-                                "Shop":      (ag_bags_s, ag_kg_s),
-                                "Anandpuri": (ag_bags_a, ag_kg_a),
-                                "Cold":      (ag_bags_c, ag_kg_c),
-                            }
-                            for loc_n, (b, k) in loc_init.items():
-                                conn.execute(
-                                    "INSERT INTO stock_levels "
-                                    "(good_id, location, batch_label, bags, quantity_kg) "
-                                    "VALUES (%s,%s,'',%s,%s)",
-                                    (new_gid, loc_n, b, k))
-                            conn.commit()
+                            with conn:
+                                cur = conn.execute(
+                                    "INSERT INTO stock_goods (category_id, good_name) VALUES (%s,%s) "
+                                    "RETURNING good_id",
+                                    (cat_id, gname))
+                                new_gid = cur.fetchone()["good_id"]
+                                loc_init = {
+                                    "Transport": (ag_bags_t, ag_kg_t),
+                                    "Shop":      (ag_bags_s, ag_kg_s),
+                                    "Anandpuri": (ag_bags_a, ag_kg_a),
+                                    "Cold":      (ag_bags_c, ag_kg_c),
+                                }
+                                for loc_n, (b, k) in loc_init.items():
+                                    conn.execute(
+                                        "INSERT INTO stock_levels "
+                                        "(good_id, location, batch_label, bags, quantity_kg) "
+                                        "VALUES (%s,%s,'',%s,%s)",
+                                        (new_gid, loc_n, b, k))
+                            invalidate_lookup_cache()
                             st.success(f"✓ Added '{gname}' to {cat_name}.")
                             st.rerun()
                         except psycopg2.errors.UniqueViolation:

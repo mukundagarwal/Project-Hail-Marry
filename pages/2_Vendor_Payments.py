@@ -16,7 +16,8 @@ from datetime import date
 from utils.db import (
     pg_read_sql, get_conn, FIRM_SP, FIRM_MT, SRC_VENDOR_RTGS, SRC_VENDOR_UB,
     log_stock_change, add_unidentified_stock, reverse_unidentified_stock,
-    get_all_vendors_cached, invalidate_lookup_cache)
+    get_all_vendors_cached, invalidate_lookup_cache,
+    ensure_good_at_all_locations)
 from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.formatters import fmt_inr, fmt_date, h, parse_slash_amount
 from utils.auth import require_login, render_logout_button
@@ -202,17 +203,14 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                 nm = ng.strip()
                 if nm:
                     try:
-                        cur = conn.execute(
-                            "INSERT INTO stock_goods (category_id, good_name) VALUES (%s,%s) "
-                            "RETURNING good_id",
-                            (sel_cat_id, nm))
-                        gid = cur.fetchone()["good_id"]
-                        for loc in ["Transport", "Shop", "Anandpuri"]:
-                            conn.execute(
-                                "INSERT INTO stock_levels "
-                                "(good_id, location, bags, quantity_kg) VALUES (%s,%s,0,0)",
-                                (gid, loc))
-                        conn.commit()
+                        with conn:
+                            cur = conn.execute(
+                                "INSERT INTO stock_goods (category_id, good_name) VALUES (%s,%s) "
+                                "RETURNING good_id",
+                                (sel_cat_id, nm))
+                            gid = cur.fetchone()["good_id"]
+                            ensure_good_at_all_locations(conn, gid)
+                        invalidate_lookup_cache()
                         st.success(f"Added '{nm}'")
                         st.rerun()
                     except psycopg2.errors.UniqueViolation:

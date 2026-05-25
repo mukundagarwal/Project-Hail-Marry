@@ -253,7 +253,11 @@ def get_merged_goods_cached():
 
 
 def invalidate_lookup_cache():
-    """Call after adding/deleting brokers, vendors, or stock goods to bust stale caches."""
+    # Call after any write to: brokers, vendors, stock_goods, stock_categories
+    # Callers (update this list when adding new write paths):
+    #   pages/1_Customer_Payments.py  — add_broker, delete_broker
+    #   pages/2_Vendor_Payments.py    — add_vendor, delete_vendor, add_good (bill form)
+    #   pages/3_Stock_Register.py     — add_category, add_good, edit_good, delete_good
     for _fn in (get_all_brokers_cached, get_all_vendors_cached, get_merged_goods_cached):
         try:
             _fn.clear()
@@ -265,6 +269,28 @@ def _db_ph(conn) -> str:
     """Return SQL placeholder for this connection: '?' for SQLite, '%s' for PostgreSQL."""
     import sqlite3 as _sqlite3
     return "?" if isinstance(conn, _sqlite3.Connection) else "%s"
+
+
+def execute_in_clause(conn, sql_template: str, ids, extra_params=()):
+    """
+    Execute SQL with an IN clause that works on both PostgreSQL and SQLite.
+    sql_template must contain the literal text '{IN_CLAUSE}' where the list goes.
+    extra_params: additional positional parameters that appear AFTER the IN list
+    in the SQL template (use the dialect-appropriate placeholder in the template).
+    Returns the cursor, or None if ids is empty.
+
+    Example:
+        cur = execute_in_clause(
+            conn,
+            "DELETE FROM passbook_entries WHERE source_id IN {IN_CLAUSE} AND firm=%s",
+            [1, 2, 3], ("SP Spices",))
+    """
+    if not ids:
+        return None
+    ph = _db_ph(conn)
+    placeholders = ",".join([ph] * len(ids))
+    sql = sql_template.replace("{IN_CLAUSE}", f"({placeholders})")
+    return conn.execute(sql, list(ids) + list(extra_params))
 
 
 def _sqlite_ddl(conn):
@@ -706,10 +732,13 @@ def log_stock_change(conn, category_name: str, good_name: str,
 
 
 def purge_old_stock_history(conn) -> None:
-    conn.execute("""
-        DELETE FROM stock_history
-        WHERE recorded_at < to_char(NOW() - INTERVAL '30 days', 'YYYY-MM-DD HH24:MI:SS')
-    """)
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    ph = _db_ph(conn)
+    conn.execute(
+        f"DELETE FROM stock_history WHERE recorded_at < {ph}",
+        (cutoff,)
+    )
 
 
 def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str) -> list:
@@ -861,3 +890,36 @@ def reverse_stock_for_bill_delete(conn, transaction_id: int) -> None:
                     "stock_history log failed during bill delete reversal for txn %s",
                     transaction_id
                 )
+
+
+_ALL_STOCK_LOCATIONS = ["Transport", "Shop", "Anandpuri", "Cold"]
+
+
+def ensure_good_at_all_locations(conn, good_id: int) -> None:
+    """
+    Insert zero-quantity stock_levels rows for all 4 locations if missing.
+    Idempotent — safe to call multiple times.
+    """
+    ph = _db_ph(conn)
+    for loc in _ALL_STOCK_LOCATIONS:
+        conn.execute(
+            f"INSERT INTO stock_levels "
+            f"(good_id, location, batch_label, bags, quantity_kg) "
+            f"VALUES ({ph}, {ph}, '', 0, 0) ON CONFLICT DO NOTHING",
+            (good_id, loc),
+        )
+
+
+def ensure_category_at_all_locations(conn, category_id: int) -> None:
+    """
+    Insert zero unidentified_stock rows for all 4 locations if missing.
+    Idempotent — safe to call multiple times.
+    """
+    ph = _db_ph(conn)
+    for loc in _ALL_STOCK_LOCATIONS:
+        conn.execute(
+            f"INSERT INTO unidentified_stock "
+            f"(category_id, location, bags, quantity_kg) "
+            f"VALUES ({ph}, {ph}, 0, 0) ON CONFLICT DO NOTHING",
+            (category_id, loc),
+        )
