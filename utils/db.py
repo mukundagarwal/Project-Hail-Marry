@@ -370,6 +370,7 @@ def _sqlite_ddl(conn):
             location    TEXT NOT NULL,
             bags        REAL NOT NULL DEFAULT 0,
             quantity_kg REAL NOT NULL DEFAULT 0,
+            notes       TEXT,
             UNIQUE (category_id, location)
         )""",
         """CREATE TABLE IF NOT EXISTS stock_transfers (
@@ -465,6 +466,9 @@ def ensure_schema(conn=None):
                     END IF;
                 END $$
             """)
+            conn.execute(
+                "ALTER TABLE unidentified_stock ADD COLUMN IF NOT EXISTS notes TEXT"
+            )
             conn.commit()
 
         # ── Seed stock categories & goods ──────────────────────

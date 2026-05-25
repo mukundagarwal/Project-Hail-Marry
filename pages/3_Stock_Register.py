@@ -375,12 +375,13 @@ elif st.session_state.stock_page == "category":
 
             # Unidentified stock for this location
             _unid_row = conn.execute("""
-                SELECT bags, quantity_kg
+                SELECT bags, quantity_kg, notes
                 FROM unidentified_stock
                 WHERE category_id = %s AND location = %s
             """, (cat_id, loc)).fetchone()
-            _unid_bags = float(_unid_row["bags"] or 0) if _unid_row else 0.0
-            _unid_kg   = float(_unid_row["quantity_kg"] or 0) if _unid_row else 0.0
+            _unid_bags  = float(_unid_row["bags"] or 0) if _unid_row else 0.0
+            _unid_kg    = float(_unid_row["quantity_kg"] or 0) if _unid_row else 0.0
+            _unid_notes = str(_unid_row["notes"] or '') if _unid_row else ''
 
             with col_widget:
                 # Panel header (total includes unidentified)
@@ -398,6 +399,11 @@ elif st.session_state.stock_page == "category":
 
                 # Unidentified stock card — hidden when both values are zero
                 if _unid_bags != 0 or _unid_kg != 0:
+                    _unid_notes_html = (
+                        f'<div style="font-size:.72rem;color:#8a7040;'
+                        f'font-style:italic;margin-top:4px">{h(_unid_notes)}</div>'
+                        if _unid_notes else ''
+                    )
                     st.markdown(
                         f'<div style="background:#1a1208;border:1px solid #4a3010;'
                         f'border-radius:10px;padding:0.7rem 1rem;margin-bottom:0.8rem">'
@@ -407,7 +413,8 @@ elif st.session_state.stock_page == "category":
                         f'<b>{_unid_bags:,.0f}</b> bags &nbsp;·&nbsp; '
                         f'<b>{_unid_kg:,.2f} kg</b></div>'
                         f'<div style="font-size:.72rem;color:#6a5a30;margin-top:3px">'
-                        f'Category known · Specific good not yet identified</div></div>',
+                        f'Category known · Specific good not yet identified</div>'
+                        f'{_unid_notes_html}</div>',
                         unsafe_allow_html=True)
 
                 # Edit button + form for unidentified stock
@@ -430,6 +437,10 @@ elif st.session_state.stock_page == "category":
                         _new_ukg   = st.number_input(
                             "Weight (Kg)", value=float(_unid_kg), step=0.1,
                             key=f"unid_nk_{cat_id}_{loc}")
+                        _new_unotes = st.text_input(
+                            "Notes (optional)", value=_unid_notes,
+                            placeholder="e.g. Arrived from Kerala, mixed grades",
+                            key=f"unid_nn_{cat_id}_{loc}")
                         _uc1, _uc2 = st.columns(2)
                         with _uc1:
                             _usave = st.form_submit_button(
@@ -453,10 +464,11 @@ elif st.session_state.stock_page == "category":
                                     pass
                                 conn.execute("""
                                     UPDATE unidentified_stock
-                                       SET bags = %s, quantity_kg = %s
+                                       SET bags = %s, quantity_kg = %s, notes = %s
                                      WHERE category_id = %s AND location = %s
                                 """, (round(float(_new_ubags), 2),
                                       round(float(_new_ukg), 2),
+                                      _new_unotes.strip() or None,
                                       cat_id, loc))
                             st.session_state[_unid_edit_key] = False
                             st.rerun()
@@ -469,7 +481,7 @@ elif st.session_state.stock_page == "category":
                     _named  = _grp[_grp['batch_label'] != '']
                     _agg_b  = _grp['bags'].sum()
                     _agg_k  = _grp['quantity_kg'].sum()
-                    if _agg_b == 0 and _agg_k == 0 and _named.empty:
+                    if _agg_b == 0 and _agg_k == 0:
                         continue
                     _any_stock = True
 
@@ -514,10 +526,10 @@ elif st.session_state.stock_page == "category":
                             f'font-size:0.8rem;font-weight:700">{float(_agg_k):,.1f}</td>'
                             f'</tr>'
                         )
-                        # Sub-rows (default '' row + named batches)
+                        # Sub-rows (default '' row + named batches, skip zeros)
                         for _, _br in _grp.iterrows():
                             _bl     = str(_br['batch_label'])
-                            if not _bl and int(_br["bags"]) == 0 and float(_br["quantity_kg"]) == 0:
+                            if int(_br["bags"]) == 0 and float(_br["quantity_kg"]) == 0:
                                 continue
                             _bn     = str(_br['batch_notes'] or '')
                             _dlbl   = _bl if _bl else 'Default'
@@ -881,6 +893,12 @@ elif st.session_state.stock_page == "category":
                     f'</div>',
                     unsafe_allow_html=True)
 
+            _upd_search = st.text_input(
+                "🔍 Search goods",
+                placeholder="Type to filter...",
+                key=f"upd_search_{upd_loc}",
+                label_visibility="collapsed")
+
             try:
                 with st.form(f"update_form_{upd_loc}"):
                     # Column headers
@@ -904,6 +922,8 @@ elif st.session_state.stock_page == "category":
                     upd_vals = {}
                     for (gid, gname), _grp in df_upd.groupby(
                             ['good_id', 'good_name'], sort=False):
+                        if _upd_search and _upd_search.lower() not in str(gname).lower():
+                            continue
                         gid    = int(gid)
                         _named = _grp[_grp['batch_label'] != '']
 
@@ -1056,11 +1076,19 @@ elif st.session_state.stock_page == "category":
                     f'margin:1rem 0 0.5rem 0;text-transform:uppercase;letter-spacing:0.08em">'
                     f'＋ Add Batch to Existing Good at {h(upd_loc)}</div>',
                     unsafe_allow_html=True)
-                _ab_cols = st.columns(min(len(goods), 3))
-                for _ab_i, _ab_g in enumerate(goods):
+                _ab_search = st.text_input(
+                    "🔍 Search goods",
+                    placeholder="Type to filter...",
+                    key=f"ab_search_{upd_loc}",
+                    label_visibility="collapsed")
+                _ab_goods = [g for g in goods
+                             if not _ab_search
+                             or _ab_search.lower() in g["good_name"].lower()]
+                _ab_cols = st.columns(min(len(_ab_goods), 3)) if _ab_goods else []
+                for _ab_i, _ab_g in enumerate(_ab_goods):
                     _ab_gid   = _ab_g["good_id"]
                     _ab_gname = _ab_g["good_name"]
-                    with _ab_cols[_ab_i % len(_ab_cols)]:
+                    with _ab_cols[_ab_i % len(_ab_goods)]:
                         with st.popover(f"＋ {_ab_gname}", use_container_width=True):
                             with st.form(f"add_batch_{upd_loc}_{_ab_gid}"):
                                 ab_label = st.text_input(
@@ -1100,6 +1128,51 @@ elif st.session_state.stock_page == "category":
                                             st.error(
                                                 f"'{_blabel}' already exists for "
                                                 f"this good at {upd_loc}.")
+
+            # ── Delete named batches ──────────────────────────────
+            _named_at_loc = df_upd[df_upd['batch_label'] != '']
+            if not _named_at_loc.empty:
+                st.markdown(
+                    f'<div style="font-size:0.82rem;color:#7a3030;font-weight:600;'
+                    f'margin:1rem 0 0.5rem 0;text-transform:uppercase;letter-spacing:0.08em">'
+                    f'🗑 Delete Batch at {h(upd_loc)}</div>',
+                    unsafe_allow_html=True)
+                _del_cols = st.columns(min(len(_named_at_loc), 3))
+                for _di, (_, _dbr) in enumerate(_named_at_loc.iterrows()):
+                    _dgid    = int(_dbr['good_id'])
+                    _dgname  = str(_dbr['good_name'])
+                    _dblabel = str(_dbr['batch_label'])
+                    _dbags   = int(_dbr['bags'])
+                    _dkg     = float(_dbr['quantity_kg'])
+                    with _del_cols[_di % min(len(_named_at_loc), 3)]:
+                        with st.popover(
+                                f"🗑 {_dgname} — {_dblabel}",
+                                use_container_width=True):
+                            st.markdown(
+                                f'<div style="font-size:0.8rem;color:#c8bfa8;margin-bottom:0.5rem">'
+                                f'<b>{_dgname}</b><br>'
+                                f'Batch: <b>{h(_dblabel)}</b><br>'
+                                f'Stock: <b>{_dbags:,} bags &nbsp;·&nbsp; {_dkg:,.1f} Kg</b>'
+                                f'</div>',
+                                unsafe_allow_html=True)
+                            if _dbags != 0 or _dkg != 0:
+                                st.warning(
+                                    f"This batch has {_dbags:,} bags and "
+                                    f"{_dkg:,.1f} Kg. Deleting it will "
+                                    f"permanently remove this stock.")
+                            if st.button(
+                                    "Confirm Delete",
+                                    key=f"del_batch_{upd_loc}_{_dgid}_{_dblabel}",
+                                    use_container_width=True,
+                                    type="primary"):
+                                conn.execute(
+                                    "DELETE FROM stock_levels "
+                                    "WHERE good_id=%s AND location=%s "
+                                    "AND batch_label=%s",
+                                    (_dgid, upd_loc, _dblabel))
+                                conn.commit()
+                                st.success(f"✓ Batch '{_dblabel}' deleted.")
+                                st.rerun()
 
             # ── Add New Good sub-form ─────────────────────────────
             st.markdown(
