@@ -381,7 +381,22 @@ def _sqlite_ddl(conn):
             to_location   TEXT,
             bags_moved    REAL NOT NULL DEFAULT 0,
             kg_moved      REAL NOT NULL DEFAULT 0,
-            note          TEXT
+            note          TEXT,
+            CHECK (from_location IS NULL OR to_location IS NULL
+                   OR from_location != to_location)
+        )""",
+        """CREATE TABLE IF NOT EXISTS transaction_items (
+            item_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id   INTEGER NOT NULL
+                             REFERENCES customer_transactions(transaction_id),
+            type_of_goods    TEXT NOT NULL DEFAULT '',
+            bags             INTEGER DEFAULT 0,
+            bag_rate         REAL DEFAULT 0,
+            quantity         REAL DEFAULT 0,
+            rate             REAL DEFAULT 0,
+            freight          REAL DEFAULT 0,
+            collection_point TEXT DEFAULT '',
+            line_total       REAL DEFAULT 0
         )""",
         """CREATE TABLE IF NOT EXISTS stock_history (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -469,6 +484,19 @@ def ensure_schema(conn=None):
             conn.execute(
                 "ALTER TABLE unidentified_stock ADD COLUMN IF NOT EXISTS notes TEXT"
             )
+            conn.execute("""
+                DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'stock_transfers_no_self_transfer'
+                    ) THEN
+                        ALTER TABLE stock_transfers
+                            ADD CONSTRAINT stock_transfers_no_self_transfer
+                            CHECK (from_location IS NULL OR to_location IS NULL
+                                   OR from_location != to_location);
+                    END IF;
+                END $$
+            """)
             conn.commit()
 
         # ── Seed stock categories & goods ──────────────────────
@@ -745,3 +773,74 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
                 "— update stock register.")
 
     return warnings
+
+
+def reverse_stock_for_bill_delete(conn, transaction_id: int) -> None:
+    """
+    Restore stock levels for every item on a bill being deleted.
+    Must be called inside an open transaction (before the DELETE on transaction_items).
+    Works with both SQLite (tests) and PostgreSQL (production).
+    """
+    import sqlite3 as _sqlite3
+    ph = "?" if isinstance(conn, _sqlite3.Connection) else "%s"
+
+    items = conn.execute(
+        f"SELECT type_of_goods, bags, quantity, collection_point "
+        f"FROM transaction_items WHERE transaction_id={ph}",
+        (transaction_id,)
+    ).fetchall()
+
+    for item in items:
+        good_name = item["type_of_goods"]
+        bags      = int(item["bags"] or 0)
+        qty_kg    = float(item["quantity"] or 0)
+        loc       = item["collection_point"] or ""
+
+        if not loc or not good_name:
+            continue
+
+        good_row = conn.execute(
+            f"SELECT good_id FROM stock_goods WHERE good_name={ph}",
+            (good_name,)
+        ).fetchone()
+
+        if not good_row:
+            continue
+
+        gid = good_row["good_id"]
+
+        before_row = conn.execute(
+            f"SELECT sl.bags AS b, sl.quantity_kg AS k, "
+            f"sg.good_name AS gn, sc.category_name AS cn "
+            f"FROM stock_levels sl "
+            f"JOIN stock_goods sg ON sl.good_id = sg.good_id "
+            f"JOIN stock_categories sc ON sg.category_id = sc.category_id "
+            f"WHERE sl.good_id={ph} AND sl.location={ph} AND sl.batch_label=''",
+            (gid, loc)
+        ).fetchone()
+
+        conn.execute(
+            f"UPDATE stock_levels "
+            f"SET bags=bags+{ph}, quantity_kg=quantity_kg+{ph} "
+            f"WHERE good_id={ph} AND location={ph} AND batch_label=''",
+            (bags, qty_kg, gid, loc)
+        )
+
+        if before_row:
+            try:
+                log_stock_change(
+                    conn,
+                    before_row["cn"], before_row["gn"], loc,
+                    "Bill Delete Reversal",
+                    float(before_row["b"] or 0),
+                    float(before_row["b"] or 0) + bags,
+                    float(before_row["k"] or 0),
+                    float(before_row["k"] or 0) + qty_kg,
+                    source=f"Bill delete: txn {transaction_id}"
+                )
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "stock_history log failed during bill delete reversal for txn %s",
+                    transaction_id
+                )

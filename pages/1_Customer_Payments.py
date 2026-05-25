@@ -14,6 +14,7 @@ import time
 from utils.db import (
     pg_read_sql,
     get_conn, ensure_schema, log_audit, deduct_stock_for_sale,
+    reverse_stock_for_bill_delete,
     get_all_brokers_cached, get_merged_goods_cached, invalidate_lookup_cache,
     INTEREST_RATE_PCT, DEFAULT_GRACE_DAYS, TXNS_PER_PAGE,
     GOODS_OPTIONS, ARECA_NUT_GOODS, BLACK_PEPPER_GOODS,
@@ -1408,7 +1409,13 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                             pf1, pf2 = st.columns(2)
                             with pf1:
                                 if st.form_submit_button("💾 Save Payment", use_container_width=True):
-                                    try:
+                                    _now_p  = time.time()
+                                    _last_p = st.session_state.get("_last_payment_save_ts", 0)
+                                    if _now_p - _last_p < 3.0:
+                                        st.warning("Please wait a moment before saving again.")
+                                    else:
+                                      st.session_state["_last_payment_save_ts"] = _now_p
+                                      try:
                                         p_amt = parse_slash_amount(p_amt_s)
                                         if p_amt <= 0:
                                             st.error("Amount must be > 0.")
@@ -1420,6 +1427,10 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                             chq_no_save   = p_chq_no.strip() if p_chq_no else None
                                             chq_date_save = str(p_chq_date) if p_chq_date else None
                                             with conn:
+                                                # Lock the transaction row to prevent concurrent double-submit
+                                                conn.execute(
+                                                    "SELECT transaction_id FROM customer_transactions "
+                                                    "WHERE transaction_id=%s FOR UPDATE", (tid,))
                                                 _pmt_cur = conn.execute(
                                                     "INSERT INTO payments "
                                                     "(transaction_id,payment_date,amount,method,note,"
@@ -1430,7 +1441,12 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                      p_note.strip(), d_fs, chq_no_save,
                                                      chq_date_save, p_dep_firm))
                                                 new_pmt_id = _pmt_cur.fetchone()["payment_id"]
-                                                new_total_paid = total_paid_so_far + p_amt
+                                                # Re-read total from DB (includes the just-inserted payment)
+                                                _fresh_total = conn.execute(
+                                                    "SELECT COALESCE(SUM(amount),0) AS total "
+                                                    "FROM payments WHERE transaction_id=%s",
+                                                    (tid,)).fetchone()["total"]
+                                                new_total_paid = float(_fresh_total or 0)
                                                 new_status = ("Partial" if new_total_paid > 0 else "Pending")
                                                 conn.execute(
                                                     "UPDATE customer_transactions SET payment_status=%s,"
@@ -1475,8 +1491,8 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                          SRC_CUSTOMER_CASH, new_pmt_id))
                                             st.session_state[log_pmt_key] = False
                                             st.success(f"Payment of {fmt_inr(p_amt)} saved!"); st.rerun()
-                                    except (ValueError, InvalidOperation) as e:
-                                        st.error(f"Invalid amount: {e}")
+                                      except (ValueError, InvalidOperation) as e:
+                                          st.error(f"Invalid amount: {e}")
                             with pf2:
                                 if st.form_submit_button("Cancel", use_container_width=True):
                                     st.session_state[log_pmt_key] = False; st.rerun()
@@ -1497,26 +1513,33 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                 st.session_state[edit_key] = True; st.rerun()
                         with b2:
                             if st.button("🗑 Delete", key=f"db_{tid}", use_container_width=True):
-                                # ── Passbook sync: revert CustomerAllocation entries ──
-                                conn.execute(
-                                    "UPDATE passbook_entries SET details='Suspense',"
-                                    "source_type=%s,source_id=NULL "
-                                    "WHERE source_type=%s AND source_id=%s",
-                                    (SRC_MANUAL, SRC_ALLOCATION, tid))
-                                # ── CASH IN HAND SYNC ──────────────────────────────
-                                try:
+                                with conn:
+                                    # Reverse stock before deleting transaction_items
+                                    reverse_stock_for_bill_delete(conn, tid)
+                                    # Clean up cheque passbook entries linked to payments
+                                    conn.execute(
+                                        "DELETE FROM passbook_entries "
+                                        "WHERE source_type=%s AND source_id IN ("
+                                        "  SELECT payment_id FROM payments "
+                                        "  WHERE transaction_id=%s"
+                                        ")", (SRC_CUST_CHQ_PMT, tid))
+                                    # Revert allocation passbook entries to Suspense
+                                    conn.execute(
+                                        "UPDATE passbook_entries SET details='Suspense',"
+                                        "source_type=%s,source_id=NULL "
+                                        "WHERE source_type=%s AND source_id=%s",
+                                        (SRC_MANUAL, SRC_ALLOCATION, tid))
+                                    # Remove cash-in-hand entries for cash payments
                                     conn.execute(
                                         "DELETE FROM cash_in_hand_entries "
                                         "WHERE source_type=%s AND source_id IN ("
                                         "  SELECT payment_id FROM payments "
                                         "  WHERE transaction_id=%s AND method='Cash'"
                                         ")", (SRC_CUSTOMER_CASH, tid))
-                                except Exception:
-                                    pass
-                                conn.execute("DELETE FROM payments WHERE transaction_id=%s", (tid,))
-                                conn.execute("DELETE FROM transaction_items WHERE transaction_id=%s", (tid,))
-                                conn.execute("DELETE FROM customer_transactions WHERE transaction_id=%s", (tid,))
-                                conn.commit(); st.rerun()
+                                    conn.execute("DELETE FROM payments WHERE transaction_id=%s", (tid,))
+                                    conn.execute("DELETE FROM transaction_items WHERE transaction_id=%s", (tid,))
+                                    conn.execute("DELETE FROM customer_transactions WHERE transaction_id=%s", (tid,))
+                                st.rerun()
                         with b3:
                             if has_settle:
                                 if st.button("📄 View Bill", key=f"vb_{tid}", use_container_width=True):

@@ -862,6 +862,8 @@ elif st.session_state.stock_page == "category":
                         _good_name       = _src_row["good_name"] if _src_row else ""
 
                         errs = []
+                        if from_loc == to_loc:
+                            errs.append("Source and destination locations must be different.")
                         if bags_mv > cur_bags:
                             errs.append(
                                 f"Not enough bags at {from_loc} "
