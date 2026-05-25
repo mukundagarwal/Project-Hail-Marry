@@ -719,6 +719,61 @@ elif st.session_state.stock_page == "category":
                             f'</table>',
                             unsafe_allow_html=True)
 
+        # ── MANAGE GOODS (delete) ────────────────────────────────
+        with st.expander("🗂 Manage Goods — Delete", expanded=False):
+            if not goods:
+                st.info("No goods in this category yet.")
+            else:
+                st.markdown(
+                    '<div style="font-size:0.78rem;color:#5a5448;margin-bottom:0.8rem">'
+                    'Permanently removes a good and all its stock across every location '
+                    'and batch. Existing vendor and customer payment records are '
+                    'unaffected.</div>',
+                    unsafe_allow_html=True)
+                _mg_n   = min(len(goods), 3)
+                _mg_cols = st.columns(_mg_n)
+                for _mg_i, _mg_g in enumerate(goods):
+                    _mg_gid   = _mg_g["good_id"]
+                    _mg_gname = _mg_g["good_name"]
+                    _mg_rows  = df_levels[df_levels['good_id'] == _mg_gid]
+                    _mg_bags  = float(_mg_rows['bags'].sum())
+                    _mg_kg    = float(_mg_rows['quantity_kg'].sum())
+                    _mg_has_stock = _mg_bags != 0 or _mg_kg != 0
+                    with _mg_cols[_mg_i % _mg_n]:
+                        with st.popover(f"🗑 {_mg_gname}", use_container_width=True):
+                            st.markdown(
+                                f'<div style="font-size:0.82rem;color:#c8bfa8;'
+                                f'margin-bottom:0.6rem">'
+                                f'<b>{h(_mg_gname)}</b><br>'
+                                f'<span style="color:#5a5448">Total across all '
+                                f'locations &amp; batches:</span><br>'
+                                f'<b style="color:#d4864a">{_mg_bags:,.0f} bags'
+                                f'</b> &nbsp;·&nbsp; '
+                                f'<b style="color:#6a9fd4">{_mg_kg:,.1f} Kg</b>'
+                                f'</div>',
+                                unsafe_allow_html=True)
+                            if _mg_has_stock:
+                                st.warning(
+                                    f"This good still has stock "
+                                    f"({_mg_bags:,.0f} bags / {_mg_kg:,.1f} Kg "
+                                    f"across all locations). All stock data will "
+                                    f"be permanently deleted.")
+                            if st.button(
+                                    "Confirm Delete",
+                                    key=f"del_good_{cat_id}_{_mg_gid}",
+                                    use_container_width=True,
+                                    type="primary"):
+                                with conn:
+                                    conn.execute(
+                                        "DELETE FROM stock_levels "
+                                        "WHERE good_id = %s", (_mg_gid,))
+                                    conn.execute(
+                                        "DELETE FROM stock_goods "
+                                        "WHERE good_id = %s", (_mg_gid,))
+                                st.success(
+                                    f"✓ '{_mg_gname}' deleted from {cat_name}.")
+                                st.rerun()
+
         # ── LEVEL 3A: TRANSFER FORM ──────────────────────────────
         if st.session_state.stock_transfer_loc:
             from_loc = st.session_state.stock_transfer_loc
