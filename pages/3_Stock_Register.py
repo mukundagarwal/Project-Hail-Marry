@@ -517,6 +517,8 @@ elif st.session_state.stock_page == "category":
                         # Sub-rows (default '' row + named batches)
                         for _, _br in _grp.iterrows():
                             _bl     = str(_br['batch_label'])
+                            if not _bl and int(_br["bags"]) == 0 and float(_br["quantity_kg"]) == 0:
+                                continue
                             _bn     = str(_br['batch_notes'] or '')
                             _dlbl   = _bl if _bl else 'Default'
                             _is_neg = int(_br["bags"]) < 0 or float(_br["quantity_kg"]) < 0
