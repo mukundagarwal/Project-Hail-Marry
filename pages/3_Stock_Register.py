@@ -1088,7 +1088,7 @@ elif st.session_state.stock_page == "category":
                 for _ab_i, _ab_g in enumerate(_ab_goods):
                     _ab_gid   = _ab_g["good_id"]
                     _ab_gname = _ab_g["good_name"]
-                    with _ab_cols[_ab_i % len(_ab_goods)]:
+                    with _ab_cols[_ab_i % len(_ab_cols)]:
                         with st.popover(f"＋ {_ab_gname}", use_container_width=True):
                             with st.form(f"add_batch_{upd_loc}_{_ab_gid}"):
                                 ab_label = st.text_input(
