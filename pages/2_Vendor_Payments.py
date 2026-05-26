@@ -143,6 +143,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                         _nc_id = _nc_row.fetchone()["category_id"]
                         ensure_category_at_all_locations(conn, _nc_id)
                         conn.commit()
+                        invalidate_lookup_cache()
                         st.success(f"Added '{nm}'")
                         st.rerun()
                     except psycopg2.errors.UniqueViolation:
@@ -894,10 +895,10 @@ if st.session_state.vp_page == "home":
     st.markdown('<div class="page-sub">Vendor directory</div>', unsafe_allow_html=True)
 
     _vs = get_cached_vendor_home_stats()
-    n_vendors = int(_vs["n_vendors"])
-    tot_bills = float(_vs["tot_bills"])
-    tot_pmts  = float(_vs["tot_pmts"])
-    net_bal   = round(float(_vs["net_bal"]), 2)
+    n_vendors = int(_vs.get("n_vendors", 0))
+    tot_bills = float(_vs.get("tot_bills", 0))
+    tot_pmts  = float(_vs.get("tot_pmts", 0))
+    net_bal   = round(float(_vs.get("net_bal", 0)), 2)
 
     conn = get_conn()
     # row_factory not needed with psycopg2 RealDictCursor
@@ -940,6 +941,7 @@ if st.session_state.vp_page == "home":
                                     (int(max_id) + 1, nm))
                                 conn.commit()
                                 invalidate_lookup_cache()
+                                invalidate_vendor_cache()
                                 st.toast(f"Vendor '{nm}' added.", icon="✅")
                                 st.rerun()
                             except psycopg2.errors.UniqueViolation:
