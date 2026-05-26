@@ -915,51 +915,55 @@ elif st.session_state.stock_page == "category":
                                 st.error(e)
                         else:
                             _log_sfx = f" [Batch: {batch_label}]" if batch_label else ""
-                            with conn:
-                                conn.execute(
-                                    "UPDATE stock_levels "
-                                    "SET bags=bags-%s, quantity_kg=quantity_kg-%s "
-                                    "WHERE good_id=%s AND location=%s AND batch_label=%s",
-                                    (bags_mv, kg_mv, gid, from_loc, batch_label))
-                                conn.execute("""
-                                    INSERT INTO stock_levels
-                                        (good_id, location, batch_label, bags, quantity_kg)
-                                    VALUES (%s, %s, %s, %s, %s)
-                                    ON CONFLICT (good_id, location, batch_label) DO UPDATE
-                                        SET bags        = stock_levels.bags        + excluded.bags,
-                                            quantity_kg = stock_levels.quantity_kg + excluded.quantity_kg
-                                """, (gid, to_loc, batch_label, bags_mv, kg_mv))
-                                conn.execute(
-                                    "INSERT INTO stock_transfers "
-                                    "(transfer_date,good_id,from_location,to_location,"
-                                    "bags_moved,kg_moved,note) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                                    (str(transfer_date), gid, from_loc, to_loc,
-                                     bags_mv, kg_mv, tf_note.strip()))
-                                try:
-                                    log_stock_change(
-                                        conn, _cat_name, _good_name, from_loc,
-                                        "Transfer Out",
-                                        _src_bags_before, _src_bags_before - bags_mv,
-                                        _src_kg_before,   _src_kg_before   - kg_mv,
-                                        source=f"Transferred to {to_loc}{_log_sfx}"
-                                    )
-                                    log_stock_change(
-                                        conn, _cat_name, _good_name, to_loc,
-                                        "Transfer In",
-                                        _dst_bags_before, _dst_bags_before + bags_mv,
-                                        _dst_kg_before,   _dst_kg_before   + kg_mv,
-                                        source=f"Transferred from {from_loc}{_log_sfx}"
-                                    )
-                                except Exception as _e:
-                                    import logging
-                                    logging.getLogger(__name__).warning(
-                                        "stock_history log failed: %s", _e)
-                            st.session_state.stock_transfer_loc = None
-                            _batch_note = f" (Batch: {batch_label})" if batch_label else ""
-                            st.success(
-                                f"✓ Transferred {bags_mv:,} bags & {kg_mv:,.1f} Kg of "
-                                f"**{sel_good}**{_batch_note} from {from_loc} → {to_loc}.")
-                            st.rerun()
+                            try:
+                                with conn:
+                                    conn.execute(
+                                        "UPDATE stock_levels "
+                                        "SET bags=bags-%s, quantity_kg=quantity_kg-%s "
+                                        "WHERE good_id=%s AND location=%s AND batch_label=%s",
+                                        (bags_mv, kg_mv, gid, from_loc, batch_label))
+                                    conn.execute("""
+                                        INSERT INTO stock_levels
+                                            (good_id, location, batch_label, bags, quantity_kg)
+                                        VALUES (%s, %s, %s, %s, %s)
+                                        ON CONFLICT (good_id, location, batch_label) DO UPDATE
+                                            SET bags        = stock_levels.bags        + excluded.bags,
+                                                quantity_kg = stock_levels.quantity_kg + excluded.quantity_kg
+                                    """, (gid, to_loc, batch_label, bags_mv, kg_mv))
+                                    conn.execute(
+                                        "INSERT INTO stock_transfers "
+                                        "(transfer_date,good_id,from_location,to_location,"
+                                        "bags_moved,kg_moved,note) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                                        (str(transfer_date), gid, from_loc, to_loc,
+                                         bags_mv, kg_mv, tf_note.strip()))
+                                    try:
+                                        log_stock_change(
+                                            conn, _cat_name, _good_name, from_loc,
+                                            "Transfer Out",
+                                            _src_bags_before, _src_bags_before - bags_mv,
+                                            _src_kg_before,   _src_kg_before   - kg_mv,
+                                            source=f"Transferred to {to_loc}{_log_sfx}"
+                                        )
+                                        log_stock_change(
+                                            conn, _cat_name, _good_name, to_loc,
+                                            "Transfer In",
+                                            _dst_bags_before, _dst_bags_before + bags_mv,
+                                            _dst_kg_before,   _dst_kg_before   + kg_mv,
+                                            source=f"Transferred from {from_loc}{_log_sfx}"
+                                        )
+                                    except Exception as _e:
+                                        import logging
+                                        logging.getLogger(__name__).warning(
+                                            "stock_history log failed: %s", _e)
+                                st.session_state.stock_transfer_loc = None
+                                _batch_note = f" (Batch: {batch_label})" if batch_label else ""
+                                st.success(
+                                    f"✓ Transferred {bags_mv:,} bags & {kg_mv:,.1f} Kg of "
+                                    f"**{sel_good}**{_batch_note} from {from_loc} → {to_loc}.")
+                                st.rerun()
+                            except Exception as e:
+                                conn.rollback()
+                                st.error(f"Failed to transfer stock: {e}")
 
         # ── LEVEL 3B: UPDATE FORM ────────────────────────────────
         if st.session_state.stock_update_loc:

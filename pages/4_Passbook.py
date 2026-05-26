@@ -625,22 +625,30 @@ elif st.session_state.pb_view == "firm":
                         if st.button("⏳ Pending", key=f"pb_st_{eid}",
                                      use_container_width=True,
                                      help="Click to mark Cleared"):
-                            conn.execute(
-                                "UPDATE passbook_entries SET cheque_status=%s "
-                                "WHERE entry_id=%s", (CHQ_CLEARED, eid))
-                            conn.commit()
-                            clear_passbook_cache()
-                            st.rerun()
+                            try:
+                                conn.execute(
+                                    "UPDATE passbook_entries SET cheque_status=%s "
+                                    "WHERE entry_id=%s", (CHQ_CLEARED, eid))
+                                conn.commit()
+                                clear_passbook_cache()
+                                st.rerun()
+                            except Exception as e:
+                                conn.rollback()
+                                st.error(f"Failed to update cheque status: {e}")
                     elif _chq_eligible and chq_st == CHQ_CLEARED:
                         if st.button("✓ Cleared", key=f"pb_st_{eid}",
                                      use_container_width=True,
                                      help="Click to mark Pending"):
-                            conn.execute(
-                                "UPDATE passbook_entries SET cheque_status=%s "
-                                "WHERE entry_id=%s", (CHQ_PENDING, eid))
-                            conn.commit()
-                            clear_passbook_cache()
-                            st.rerun()
+                            try:
+                                conn.execute(
+                                    "UPDATE passbook_entries SET cheque_status=%s "
+                                    "WHERE entry_id=%s", (CHQ_PENDING, eid))
+                                conn.commit()
+                                clear_passbook_cache()
+                                st.rerun()
+                            except Exception as e:
+                                conn.rollback()
+                                st.error(f"Failed to update cheque status: {e}")
                     else:
                         st.markdown(f'<div style="{_CELL};color:#3a3628">—</div>',
                                     unsafe_allow_html=True)
@@ -836,7 +844,7 @@ elif st.session_state.pb_view == "firm":
                                                 "WHERE transaction_id=%s",
                                                 (_a_tid,)).fetchone()
                                             _df = days_between(
-                                                str(_bill_d[0]),
+                                                str(_bill_d["date"]),
                                                 ne_date) if _bill_d else 0
                                             conn.execute(
                                                 "UPDATE payments "
@@ -912,18 +920,22 @@ elif st.session_state.pb_view == "firm":
                                 else:
                                     _chq2   = ne_chq.strip() or None
                                     _chqst2 = ne_chq_st if _chq2 else None
-                                    conn.execute(
-                                        "UPDATE passbook_entries SET "
-                                        "entry_date=%s,details=%s,amount=%s,txn_type=%s,"
-                                        "cheque_number=%s,cheque_status=%s "
-                                        "WHERE entry_id=%s",
-                                        (str(ne_date), _det2, round(ne_amt, 2),
-                                         ne_type, _chq2, _chqst2, eid))
-                                    conn.commit()
-                                    st.session_state[f"pb_edit_{eid}"] = False
-                                    st.success("Entry updated.")
-                                    clear_passbook_cache()
-                                    st.rerun()
+                                    try:
+                                        conn.execute(
+                                            "UPDATE passbook_entries SET "
+                                            "entry_date=%s,details=%s,amount=%s,txn_type=%s,"
+                                            "cheque_number=%s,cheque_status=%s "
+                                            "WHERE entry_id=%s",
+                                            (str(ne_date), _det2, round(ne_amt, 2),
+                                             ne_type, _chq2, _chqst2, eid))
+                                        conn.commit()
+                                        st.session_state[f"pb_edit_{eid}"] = False
+                                        st.success("Entry updated.")
+                                        clear_passbook_cache()
+                                        st.rerun()
+                                    except Exception as e:
+                                        conn.rollback()
+                                        st.error(f"Failed to update entry: {e}")
                         with efs2:
                             if st.button("✕ Cancel", key=f"pb_efcx_{eid}",
                                          use_container_width=True):

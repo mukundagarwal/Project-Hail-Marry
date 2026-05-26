@@ -20,7 +20,7 @@ from utils.db import (
     get_cached_transactions_for_broker, get_cached_ledger_stats,
     invalidate_customer_cache,
     INTEREST_RATE_PCT, DEFAULT_GRACE_DAYS, TXNS_PER_PAGE,
-    GOODS_OPTIONS, ARECA_NUT_GOODS, BLACK_PEPPER_GOODS,
+    GOODS_OPTIONS, ARECA_NUT_GOODS, BLACK_PEPPER_GOODS, STOCK_LOCATIONS,
     FIRM_SP, FIRM_MT, FIRMS,
     BANK_ACCOUNTS, DEFAULT_BANK_ACCOUNT,
     SRC_MANUAL, SRC_VENDOR_RTGS,
@@ -319,20 +319,20 @@ elif st.session_state.page == "ledger":
         <div class="ledger-header">
             <div>
                 <div class="lh-name">{h(bname)}</div>
-                <div class="lh-id">{int(stats['cnt'])} transactions
-                    &nbsp;·&nbsp; <span style="color:#b89040">{int(stats['uncalc'])} pending calc</span>
-                    &nbsp;·&nbsp; <span style="color:#ff6060">{int(stats['overdue_cnt'])} overdue (&gt;60 days)</span>
+                <div class="lh-id">{int(stats.get('cnt', 0))} transactions
+                    &nbsp;·&nbsp; <span style="color:#b89040">{int(stats.get('uncalc', 0))} pending calc</span>
+                    &nbsp;·&nbsp; <span style="color:#ff6060">{int(stats.get('overdue_cnt', 0))} overdue (&gt;60 days)</span>
                 </div>
             </div>
             <div style="display:flex;gap:1.8rem;text-align:right;flex-wrap:wrap">
                 <div><div style="font-size:.65rem;color:#3a3628;text-transform:uppercase;letter-spacing:.1em">Total Billed</div>
-                     <div style="font-size:1.1rem;font-weight:600;color:#e8c97e">{fmt_inr(stats['total'])}</div></div>
+                     <div style="font-size:1.1rem;font-weight:600;color:#e8c97e">{fmt_inr(stats.get('total', 0))}</div></div>
                 <div><div style="font-size:.65rem;color:#3a3628;text-transform:uppercase;letter-spacing:.1em">Collected</div>
-                     <div style="font-size:1.1rem;font-weight:600;color:#6dbf67">{fmt_inr(stats['paid'])}</div></div>
+                     <div style="font-size:1.1rem;font-weight:600;color:#6dbf67">{fmt_inr(stats.get('paid', 0))}</div></div>
                 <div><div style="font-size:.65rem;color:#3a3628;text-transform:uppercase;letter-spacing:.1em">Pending</div>
-                     <div style="font-size:1.1rem;font-weight:600;color:#d4864a">{fmt_inr(stats['pending'])}</div></div>
+                     <div style="font-size:1.1rem;font-weight:600;color:#d4864a">{fmt_inr(stats.get('pending', 0))}</div></div>
                 <div><div style="font-size:.65rem;color:#3a3628;text-transform:uppercase;letter-spacing:.1em">Net Settlement</div>
-                     <div style="font-size:1.1rem;font-weight:600;color:#8dd87a">{fmt_inr(stats['settled'])}</div></div>
+                     <div style="font-size:1.1rem;font-weight:600;color:#8dd87a">{fmt_inr(stats.get('settled', 0))}</div></div>
             </div>
         </div>""", unsafe_allow_html=True)
 
@@ -465,7 +465,7 @@ elif st.session_state.page == "ledger":
                                                    key="ifreight")
                     with ic4:
                         icollect = st.selectbox("Collected from",
-                                                ["Shop","Transport","Anandpuri"], key="icollect")
+                                                list(STOCK_LOCATIONS), key="icollect")
 
                     fa_col, fb_col = st.columns(2)
                     with fa_col:
@@ -569,54 +569,60 @@ elif st.session_state.page == "ledger":
                                             _bill_sent_ok = False
 
                                     if _bill_sent_ok:
-                                        _txn_row = conn.execute(
-                                            """INSERT INTO customer_transactions
-                                            (broker_id,customer_name,date,type_of_goods,bags,quantity,rate,
-                                             total_amount,payment_status,payment_method,
-                                             cheque_number,cheque_date,deposit_firm,bill_sent,
-                                             interest_rate_pct,calc_status,brokerage_paid)
-                                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Pending','Unpaid')
-                                            RETURNING transaction_id""",
-                                            (bid, cust, str(st.session_state.bill_date), goods_label,
-                                             total_bags, total_qty, 0, grand,
-                                             st.session_state.bill_pstatus, None,
-                                             None, None, None,
-                                             _bill_sent_save, 0.0)).fetchone()
-                                        txn_id = _txn_row["transaction_id"]
-                                        for it in st.session_state.bill_items:
-                                            conn.execute(
-                                                """INSERT INTO transaction_items
-                                                (transaction_id,type_of_goods,bags,bag_rate,
-                                                 quantity,rate,freight,collection_point,line_total)
-                                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                                                (txn_id, it["goods"], it["bags"], it["bag_rate"],
-                                                 it["qty"], it["rate"],
-                                                 it.get("freight", 0), it.get("collection_point", ""),
-                                                 it["line_total"]))
-                                        log_audit(conn, "customer_transactions", txn_id, "INSERT",
-                                                  new_value={"customer": cust, "total": grand,
-                                                             "date": str(st.session_state.bill_date)})
+                                        stock_warns = []
                                         try:
-                                            stock_warns = deduct_stock_for_sale(
-                                                conn, st.session_state.bill_items,
-                                                st.session_state.bill_date, cust)
-                                        except ValueError as _se:
-                                            stock_warns = [f"⚠ Stock deduction error: {_se}"]
-                                        conn.commit()
-                                        st.session_state.bill_items       = []
-                                        st.session_state.bill_adding_more = False
-                                        st.session_state.bill_customer    = ""
-                                        st.session_state.bill_date        = date.today()
-                                        st.session_state.bill_pstatus     = "Pending"
-                                        st.session_state["_reset_item_form"] = True
-                                        for _k in ["bill_ig_sel", "_prev_bill_ig",
-                                                   "_restore_bag_rate",
-                                                   "inp_cust", "inp_date", "inp_pst"]:
-                                            st.session_state.pop(_k, None)
-                                        for _sw in stock_warns:
-                                            st.warning(_sw)
-                                        invalidate_customer_cache()
-                                        st.success("Bill saved — stock updated."); st.rerun()
+                                            with conn:
+                                                _txn_row = conn.execute(
+                                                    """INSERT INTO customer_transactions
+                                                    (broker_id,customer_name,date,type_of_goods,bags,quantity,rate,
+                                                     total_amount,payment_status,payment_method,
+                                                     cheque_number,cheque_date,deposit_firm,bill_sent,
+                                                     interest_rate_pct,calc_status,brokerage_paid)
+                                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Pending','Unpaid')
+                                                    RETURNING transaction_id""",
+                                                    (bid, cust, str(st.session_state.bill_date), goods_label,
+                                                     total_bags, total_qty, 0, grand,
+                                                     st.session_state.bill_pstatus, None,
+                                                     None, None, None,
+                                                     _bill_sent_save, 0.0)).fetchone()
+                                                txn_id = _txn_row["transaction_id"]
+                                                for it in st.session_state.bill_items:
+                                                    conn.execute(
+                                                        """INSERT INTO transaction_items
+                                                        (transaction_id,type_of_goods,bags,bag_rate,
+                                                         quantity,rate,freight,collection_point,line_total)
+                                                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                                        (txn_id, it["goods"], it["bags"], it["bag_rate"],
+                                                         it["qty"], it["rate"],
+                                                         it.get("freight", 0), it.get("collection_point", ""),
+                                                         it["line_total"]))
+                                                log_audit(conn, "customer_transactions", txn_id, "INSERT",
+                                                          new_value={"customer": cust, "total": grand,
+                                                                     "date": str(st.session_state.bill_date)})
+                                                try:
+                                                    stock_warns = deduct_stock_for_sale(
+                                                        conn, st.session_state.bill_items,
+                                                        st.session_state.bill_date, cust)
+                                                except ValueError as _se:
+                                                    stock_warns = [f"⚠ Stock deduction error: {_se}"]
+                                        except Exception as e:
+                                            conn.rollback()
+                                            st.error(f"Failed to save bill: {e}")
+                                        else:
+                                            st.session_state.bill_items       = []
+                                            st.session_state.bill_adding_more = False
+                                            st.session_state.bill_customer    = ""
+                                            st.session_state.bill_date        = date.today()
+                                            st.session_state.bill_pstatus     = "Pending"
+                                            st.session_state["_reset_item_form"] = True
+                                            for _k in ["bill_ig_sel", "_prev_bill_ig",
+                                                       "_restore_bag_rate",
+                                                       "inp_cust", "inp_date", "inp_pst"]:
+                                                st.session_state.pop(_k, None)
+                                            for _sw in stock_warns:
+                                                st.warning(_sw)
+                                            invalidate_customer_cache()
+                                            st.success("Bill saved — stock updated."); st.rerun()
                     with sv2:
                         if st.button("✕  Clear Cart", use_container_width=True, key="clear_cart_btn"):
                             st.session_state.bill_items       = []
@@ -1170,13 +1176,10 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                 (SRC_MANUAL, _auto_alloc_eid, SRC_ALLOCATION))
                                         # ── CASH IN HAND SYNC ──────────────────────────────
                                         if p["method"] == "Cash":
-                                            try:
-                                                conn.execute(
-                                                    "DELETE FROM cash_in_hand_entries "
-                                                    "WHERE source_type=%s AND source_id=%s",
-                                                    (SRC_CUSTOMER_CASH, pid_p))
-                                            except psycopg2.errors.UniqueViolation:
-                                                pass
+                                            conn.execute(
+                                                "DELETE FROM cash_in_hand_entries "
+                                                "WHERE source_type=%s AND source_id=%s",
+                                                (SRC_CUSTOMER_CASH, pid_p))
                                         conn.execute("DELETE FROM payments WHERE payment_id=%s", (pid_p,))
                                         rem_q = pg_read_sql(
                                             "SELECT COALESCE(SUM(amount),0) s FROM payments WHERE transaction_id=%s",
@@ -1325,13 +1328,10 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                                 (str(ep_date), round(ep_amt, 2),
                                                                  SRC_CUSTOMER_CASH, pid_p))
                                                         elif _old_m == "Cash" and ep_method != "Cash":
-                                                            try:
-                                                                conn.execute(
-                                                                    "DELETE FROM cash_in_hand_entries "
-                                                                    "WHERE source_type=%s AND source_id=%s",
-                                                                    (SRC_CUSTOMER_CASH, pid_p))
-                                                            except psycopg2.errors.UniqueViolation:
-                                                                pass
+                                                            conn.execute(
+                                                                "DELETE FROM cash_in_hand_entries "
+                                                                "WHERE source_type=%s AND source_id=%s",
+                                                                (SRC_CUSTOMER_CASH, pid_p))
                                                         elif _old_m != "Cash" and ep_method == "Cash":
                                                             conn.execute(
                                                                 "INSERT INTO cash_in_hand_entries "
@@ -1550,11 +1550,16 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                         with b5:
                             bp_lbl = "✓ Brok. Paid" if brok_paid == "Unpaid" else "✗ Brok. Unpaid"
                             if st.button(bp_lbl, key=f"bp_{tid}", use_container_width=True):
-                                conn.execute(
-                                    "UPDATE customer_transactions SET brokerage_paid=%s WHERE transaction_id=%s",
-                                    ("Paid" if brok_paid == "Unpaid" else "Unpaid", tid))
-                                invalidate_customer_cache()
-                                conn.commit(); st.rerun()
+                                try:
+                                    conn.execute(
+                                        "UPDATE customer_transactions SET brokerage_paid=%s WHERE transaction_id=%s",
+                                        ("Paid" if brok_paid == "Unpaid" else "Unpaid", tid))
+                                    conn.commit()
+                                    invalidate_customer_cache()
+                                    st.rerun()
+                                except Exception as e:
+                                    conn.rollback()
+                                    st.error(f"Failed to update brokerage status: {e}")
 
                     # ── VIEW BILL ─────────────────────────────────
                     if st.session_state.get(view_key) and has_settle:
@@ -1726,14 +1731,19 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                     D_amt    = round(A * d_pct / 100, 2)
                                 b_flag = (apply_brok == "Yes")
 
-                                conn.execute(
-                                    "UPDATE customer_transactions SET interest_rate_pct=%s,discount_pct=%s,"
-                                    "discount_amount=%s,brokerage_applied=%s,brokerage_amount=%s "
-                                    "WHERE transaction_id=%s",
-                                    (INTEREST_RATE_PCT, d_pct, D_amt,
-                                     1 if b_flag else 0,
-                                     round(A*0.01,2) if b_flag else 0.0, tid))
-                                conn.commit()
+                                try:
+                                    conn.execute(
+                                        "UPDATE customer_transactions SET interest_rate_pct=%s,discount_pct=%s,"
+                                        "discount_amount=%s,brokerage_applied=%s,brokerage_amount=%s "
+                                        "WHERE transaction_id=%s",
+                                        (INTEREST_RATE_PCT, d_pct, D_amt,
+                                         1 if b_flag else 0,
+                                         round(A*0.01,2) if b_flag else 0.0, tid))
+                                    conn.commit()
+                                except Exception as e:
+                                    conn.rollback()
+                                    st.error(f"Failed to save preview settings: {e}")
+                                    st.stop()
 
                                 res = calculate_final_settlement(tid, settle_date_input, g_days, conn=conn)
 
@@ -1885,7 +1895,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                          _sv_chq_dt or str(date.today()),
                                                          _det4,
                                                          _pb_chq_amt,
-                                                         _sv_chq_no, _existing_pb[0]))
+                                                         _sv_chq_no, _existing_pb["entry_id"]))
                                                 else:
                                                     conn.execute(
                                                         "INSERT INTO passbook_entries "

@@ -246,34 +246,38 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                         _vh_b_kg   = float(_vh_row["quantity_kg"] or 0) if _vh_row else 0.0
                         _vh_cat    = _vh_row["category_name"] if _vh_row else sel_cat_name
                         _vh_good   = _vh_row["good_name"] if _vh_row else ""
-                        with conn:
-                            conn.execute(
-                                """INSERT INTO vendor_entries
-                                   (vendor_id,entry_date,ledger_type,firm,entry_kind,
-                                    particulars,amount,good_id,bags,quantity_kg,note)
-                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                                (vendor_id, str(b_date), ledger_type, firm,
-                                 "Bill", sel_cat_name, -amt,
-                                 sel_good_id, round(float(_bags_val), 2),
-                                 round(float(_kg_val), 2), note_s.strip()))
-                            conn.execute(
-                                "UPDATE stock_levels SET bags=bags+%s, quantity_kg=quantity_kg+%s "
-                                "WHERE good_id=%s AND location='Transport'",
-                                (round(float(_bags_val), 2), round(float(_kg_val), 2),
-                                 sel_good_id))
-                            try:
-                                log_stock_change(
-                                    conn, _vh_cat, _vh_good, "Transport", "Vendor Bill",
-                                    _vh_b_bags, _vh_b_bags + float(_bags_val),
-                                    _vh_b_kg,   _vh_b_kg   + float(_kg_val),
-                                    source=f"Vendor: {_vn_str}")
-                            except Exception as _e:
-                                import logging
-                                logging.getLogger(__name__).warning(
-                                    "stock_history log failed: %s", _e)
-                        invalidate_vendor_cache()
-                        st.success(f"Bill of {fmt_inr(amt)} saved. Transport stock updated.")
-                        st.rerun()
+                        try:
+                            with conn:
+                                conn.execute(
+                                    """INSERT INTO vendor_entries
+                                       (vendor_id,entry_date,ledger_type,firm,entry_kind,
+                                        particulars,amount,good_id,bags,quantity_kg,note)
+                                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                    (vendor_id, str(b_date), ledger_type, firm,
+                                     "Bill", sel_cat_name, -amt,
+                                     sel_good_id, round(float(_bags_val), 2),
+                                     round(float(_kg_val), 2), note_s.strip()))
+                                conn.execute(
+                                    "UPDATE stock_levels SET bags=bags+%s, quantity_kg=quantity_kg+%s "
+                                    "WHERE good_id=%s AND location='Transport'",
+                                    (round(float(_bags_val), 2), round(float(_kg_val), 2),
+                                     sel_good_id))
+                                try:
+                                    log_stock_change(
+                                        conn, _vh_cat, _vh_good, "Transport", "Vendor Bill",
+                                        _vh_b_bags, _vh_b_bags + float(_bags_val),
+                                        _vh_b_kg,   _vh_b_kg   + float(_kg_val),
+                                        source=f"Vendor: {_vn_str}")
+                                except Exception as _e:
+                                    import logging
+                                    logging.getLogger(__name__).warning(
+                                        "stock_history log failed: %s", _e)
+                            invalidate_vendor_cache()
+                            st.success(f"Bill of {fmt_inr(amt)} saved. Transport stock updated.")
+                            st.rerun()
+                        except Exception as e:
+                            conn.rollback()
+                            st.error(f"Failed to save bill: {e}")
 
                 elif _bill_mode == "B":
                     try:
@@ -282,44 +286,52 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                     except ValueError as _pe:
                         st.error(f"Invalid number: {_pe}")
                         st.stop()
-                    with conn:
-                        conn.execute(
-                            """INSERT INTO vendor_entries
-                               (vendor_id,entry_date,ledger_type,firm,entry_kind,
-                                particulars,amount,good_id,bags,quantity_kg,note)
-                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                            (vendor_id, str(b_date), ledger_type, firm,
-                             "Bill", sel_cat_name, -amt,
-                             None, round(float(_bags_val), 2), round(float(_kg_val), 2),
-                             note_s.strip()))
-                        try:
-                            add_unidentified_stock(conn, sel_cat_id, "Transport",
-                                                   _bags_val, _kg_val)
-                            log_stock_change(conn, sel_cat_name, "Unidentified",
-                                             "Transport", "Vendor Bill",
-                                             0, _bags_val, 0, _kg_val,
-                                             source=f"Vendor: {_vn_str}")
-                        except Exception as _e:
-                            import logging
-                            logging.getLogger(__name__).warning(
-                                "Unidentified stock update failed: %s", _e)
-                    invalidate_vendor_cache()
-                    st.success(f"Bill of {fmt_inr(amt)} saved. Unidentified stock updated.")
-                    st.rerun()
+                    try:
+                        with conn:
+                            conn.execute(
+                                """INSERT INTO vendor_entries
+                                   (vendor_id,entry_date,ledger_type,firm,entry_kind,
+                                    particulars,amount,good_id,bags,quantity_kg,note)
+                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                (vendor_id, str(b_date), ledger_type, firm,
+                                 "Bill", sel_cat_name, -amt,
+                                 None, round(float(_bags_val), 2), round(float(_kg_val), 2),
+                                 note_s.strip()))
+                            try:
+                                add_unidentified_stock(conn, sel_cat_id, "Transport",
+                                                       _bags_val, _kg_val)
+                                log_stock_change(conn, sel_cat_name, "Unidentified",
+                                                 "Transport", "Vendor Bill",
+                                                 0, _bags_val, 0, _kg_val,
+                                                 source=f"Vendor: {_vn_str}")
+                            except Exception as _e:
+                                import logging
+                                logging.getLogger(__name__).warning(
+                                    "Unidentified stock update failed: %s", _e)
+                        invalidate_vendor_cache()
+                        st.success(f"Bill of {fmt_inr(amt)} saved. Unidentified stock updated.")
+                        st.rerun()
+                    except Exception as e:
+                        conn.rollback()
+                        st.error(f"Failed to save bill: {e}")
 
                 else:  # MODE C — no stock update
-                    with conn:
-                        conn.execute(
-                            """INSERT INTO vendor_entries
-                               (vendor_id,entry_date,ledger_type,firm,entry_kind,
-                                particulars,amount,good_id,bags,quantity_kg,note)
-                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                            (vendor_id, str(b_date), ledger_type, firm,
-                             "Bill", sel_cat_name, -amt,
-                             None, 0, 0.0, note_s.strip()))
-                    invalidate_vendor_cache()
-                    st.success(f"Bill of {fmt_inr(amt)} saved.")
-                    st.rerun()
+                    try:
+                        with conn:
+                            conn.execute(
+                                """INSERT INTO vendor_entries
+                                   (vendor_id,entry_date,ledger_type,firm,entry_kind,
+                                    particulars,amount,good_id,bags,quantity_kg,note)
+                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                (vendor_id, str(b_date), ledger_type, firm,
+                                 "Bill", sel_cat_name, -amt,
+                                 None, 0, 0.0, note_s.strip()))
+                        invalidate_vendor_cache()
+                        st.success(f"Bill of {fmt_inr(amt)} saved.")
+                        st.rerun()
+                    except Exception as e:
+                        conn.rollback()
+                        st.error(f"Failed to save bill: {e}")
 
 
 def _payment_popover(vendor_id: int, ledger_type: str, firm, conn):
@@ -659,29 +671,33 @@ def _edit_form(entry_row, conn):
                         st.success("Bill updated.")
                         st.rerun()
                 else:
-                    with conn:
-                        conn.execute(
-                            "UPDATE vendor_entries SET entry_date=%s,amount=%s,firm=%s,note=%s "
-                            "WHERE entry_id=%s",
-                            (str(new_date), new_amt, new_firm, edit_note.strip(), entry_id))
-                        # ── Passbook sync: update linked RTGS passbook entry ──
-                        if entry_row.get("ledger_type") == "RTGS" and entry_row.get("firm"):
+                    try:
+                        with conn:
                             conn.execute(
-                                "UPDATE passbook_entries "
-                                "SET entry_date=%s,amount=%s,firm=%s "
-                                "WHERE source_type=%s AND source_id=%s",
-                                (str(new_date), new_amt, new_firm, SRC_VENDOR_RTGS, entry_id))
-                        # ── CASH IN HAND SYNC ──────────────────────────────
-                        if entry_row.get("ledger_type") == "UB":
-                            conn.execute(
-                                "UPDATE cash_in_hand_entries SET entry_date=%s,amount=%s "
-                                "WHERE source_type=%s AND source_id=%s",
-                                (str(new_date), new_amt, SRC_VENDOR_UB, entry_id))
-                    st.session_state[f"vp_edit_{entry_id}"] = False
-                    clear_passbook_cache()
-                    invalidate_vendor_cache()
-                    st.success("Payment updated.")
-                    st.rerun()
+                                "UPDATE vendor_entries SET entry_date=%s,amount=%s,firm=%s,note=%s "
+                                "WHERE entry_id=%s",
+                                (str(new_date), new_amt, new_firm, edit_note.strip(), entry_id))
+                            # ── Passbook sync: update linked RTGS passbook entry ──
+                            if entry_row.get("ledger_type") == "RTGS" and entry_row.get("firm"):
+                                conn.execute(
+                                    "UPDATE passbook_entries "
+                                    "SET entry_date=%s,amount=%s,firm=%s "
+                                    "WHERE source_type=%s AND source_id=%s",
+                                    (str(new_date), new_amt, new_firm, SRC_VENDOR_RTGS, entry_id))
+                            # ── CASH IN HAND SYNC ──────────────────────────────
+                            if entry_row.get("ledger_type") == "UB":
+                                conn.execute(
+                                    "UPDATE cash_in_hand_entries SET entry_date=%s,amount=%s "
+                                    "WHERE source_type=%s AND source_id=%s",
+                                    (str(new_date), new_amt, SRC_VENDOR_UB, entry_id))
+                        st.session_state[f"vp_edit_{entry_id}"] = False
+                        clear_passbook_cache()
+                        invalidate_vendor_cache()
+                        st.success("Payment updated.")
+                        st.rerun()
+                    except Exception as e:
+                        conn.rollback()
+                        st.error(f"Failed to update payment: {e}")
 
 
 # ══════════════════════════════════════════════════════════════
