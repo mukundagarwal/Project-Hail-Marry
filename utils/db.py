@@ -122,7 +122,9 @@ class _PgConn:
             self.rollback()
         else:
             self.commit()
-        self.close()
+        # Do NOT close here — connection stays open for subsequent queries in the same
+        # page render cycle. Caller (page try/finally or helper _own_conn guard) closes it.
+        return False
 
 
 def _get_db_url():
