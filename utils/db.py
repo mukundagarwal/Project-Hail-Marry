@@ -673,18 +673,26 @@ def ensure_schema(conn=None):
                 "UPDATE passbook_entries SET cheque_status=NULL "
                 "WHERE source_type='VendorRTGS' AND cheque_status IS NOT NULL"
             )
-            # Migrate legacy 'Unknown' bank_account rows to BOB (one-time, guarded).
+            # Migrate legacy 'Unknown' bank_account rows to BOB.
+            # Opening rows may already have a BOB sibling (inserted by seeding on a prior
+            # run before this migration cleaned up): delete those duplicates first, then
+            # update any remaining Unknown rows across all source_types.
             conn.execute("""
                 DO $$
                 BEGIN
-                    IF EXISTS (
-                        SELECT 1 FROM passbook_entries
-                        WHERE bank_account = 'Unknown' OR bank_account IS NULL
-                    ) THEN
-                        UPDATE passbook_entries
-                        SET bank_account = 'BOB'
-                        WHERE bank_account = 'Unknown' OR bank_account IS NULL;
-                    END IF;
+                    -- Drop Unknown Opening rows that already have a BOB twin for the same firm
+                    DELETE FROM passbook_entries dup
+                    USING passbook_entries keeper
+                    WHERE dup.source_type = 'Opening'
+                      AND (dup.bank_account = 'Unknown' OR dup.bank_account IS NULL)
+                      AND keeper.firm = dup.firm
+                      AND keeper.source_type = 'Opening'
+                      AND keeper.bank_account = 'BOB';
+
+                    -- Update all remaining Unknown / NULL rows to BOB
+                    UPDATE passbook_entries
+                    SET bank_account = 'BOB'
+                    WHERE bank_account = 'Unknown' OR bank_account IS NULL;
                 END $$
             """)
             # ── Performance indexes ──────────────────────────────
