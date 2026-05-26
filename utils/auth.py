@@ -9,6 +9,7 @@ Generate a new hash with: python -c "import bcrypt; print(bcrypt.hashpw(b'yourpa
 import time
 import bcrypt
 import streamlit as st
+from utils.db import record_login_attempt, check_lockout, purge_old_login_attempts
 
 # ── Brute-force lockout config ──────────────────────────────────
 _MAX_ATTEMPTS  = 5
@@ -125,6 +126,18 @@ section[data-testid="stMain"] {
 """
 
 
+def _get_client_ip() -> str:
+    """Best-effort client IP extraction. Falls back to 'unknown' if unavailable."""
+    try:
+        headers = st.context.headers
+        ip = headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        if not ip:
+            ip = headers.get("X-Real-Ip", "").strip()
+        return ip or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def _get_password_hash() -> bytes:
     """Read bcrypt hash from st.secrets or APP_PASSWORD_HASH env var."""
     import os
@@ -196,6 +209,20 @@ def require_login() -> None:
         </div>
         """, unsafe_allow_html=True)
 
+        # ── DB-backed lockout check (cross-session protection) ──
+        _ip = _get_client_ip()
+        try:
+            _db_locked, _db_fails = check_lockout(_ip)
+            if _db_locked:
+                st.error(
+                    f"Too many failed attempts from your connection. "
+                    f"Please try again in {_LOCKOUT_SECS // 60} minutes.",
+                    icon="🔒",
+                )
+                st.stop()
+        except Exception:
+            pass  # DB unreachable — fall back to session-only protection
+
         locked, remaining = _is_locked_out()
         if locked:
             mins = remaining // 60
@@ -224,10 +251,19 @@ def require_login() -> None:
                     st.session_state._auth_attempts   = 0
                     st.session_state._auth_locked_at  = 0
                     st.session_state._auth_login_time = time.time()
+                    try:
+                        record_login_attempt(_ip, success=True)
+                        purge_old_login_attempts()
+                    except Exception:
+                        pass
                     st.rerun()
                 else:
                     attempts = st.session_state.get("_auth_attempts", 0) + 1
                     st.session_state._auth_attempts = attempts
+                    try:
+                        record_login_attempt(_ip, success=False)
+                    except Exception:
+                        pass
                     if attempts >= _MAX_ATTEMPTS:
                         st.session_state._auth_locked_at = time.time()
                         st.error(

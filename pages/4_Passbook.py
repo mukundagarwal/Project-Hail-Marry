@@ -11,7 +11,7 @@ from datetime import date, datetime
 
 from utils.db import (
     pg_read_sql,
-    get_conn, ensure_schema,
+    get_conn, _ensure_schema_once,
     FIRM_SP, FIRM_MT, FIRMS,
     SRC_MANUAL, SRC_VENDOR_RTGS,
     SRC_CUST_CHQ_TXN, SRC_CUST_CHQ_PMT,
@@ -38,7 +38,7 @@ st.set_page_config(
 
 require_login()
 render_logout_button()
-ensure_schema()
+_ensure_schema_once()
 
 st.markdown(APP_CSS, unsafe_allow_html=True)
 if st.session_state.get("light_mode"):

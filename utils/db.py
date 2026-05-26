@@ -211,9 +211,11 @@ def pg_read_sql(sql, conn, params=None):
 
 try:
     import streamlit as _st_mod
-    _cache_ttl_300 = _st_mod.cache_data(ttl=300, show_spinner=False)
+    _cache_ttl_300    = _st_mod.cache_data(ttl=300, show_spinner=False)
+    _cache_resource   = _st_mod.cache_resource
 except Exception:
-    _cache_ttl_300 = lambda f: f  # identity — tests / non-Streamlit contexts
+    _cache_ttl_300    = lambda f: f   # identity — tests / non-Streamlit contexts
+    _cache_resource   = lambda f: f
 
 
 @_cache_ttl_300
@@ -310,9 +312,13 @@ def _sqlite_ddl(conn):
             payment_received  REAL NOT NULL DEFAULT 0,
             discount_pct      REAL NOT NULL DEFAULT 0,
             brokerage_applied INTEGER NOT NULL DEFAULT 0,
+            brokerage_paid    TEXT NOT NULL DEFAULT 'Unpaid',
             calc_status       TEXT NOT NULL DEFAULT 'Pending',
             final_settlement  REAL,
-            interest_amount   REAL NOT NULL DEFAULT 0
+            interest_amount   REAL NOT NULL DEFAULT 0,
+            bill_sent         REAL,
+            grace_days        INTEGER DEFAULT 35,
+            notes             TEXT DEFAULT ''
         )""",
         """CREATE TABLE IF NOT EXISTS payments (
             payment_id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -323,7 +329,11 @@ def _sqlite_ddl(conn):
             note               TEXT,
             days_from_start    INTEGER NOT NULL DEFAULT 0,
             interest_charged   REAL NOT NULL DEFAULT 0,
-            passbook_entry_id  INTEGER
+            passbook_entry_id  INTEGER,
+            cheque_number      TEXT DEFAULT '',
+            cheque_date        TEXT DEFAULT '',
+            deposit_firm       TEXT DEFAULT '',
+            cheque_status      TEXT DEFAULT 'Pending'
         )""",
         """CREATE TABLE IF NOT EXISTS vendors (
             vendor_id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -350,13 +360,16 @@ def _sqlite_ddl(conn):
             amount        REAL NOT NULL DEFAULT 0,
             txn_type      TEXT NOT NULL,
             cheque_status TEXT,
+            cheque_number TEXT DEFAULT '',
+            cheque_date   TEXT DEFAULT '',
             source_type   TEXT NOT NULL DEFAULT 'Manual',
             source_id     INTEGER
         )""",
         """CREATE TABLE IF NOT EXISTS passbook_opening_balance (
             firm           TEXT PRIMARY KEY,
             opening_amount REAL NOT NULL DEFAULT 0,
-            opening_date   TEXT NOT NULL
+            opening_date   TEXT NOT NULL,
+            notes          TEXT DEFAULT ''
         )""",
         """CREATE TABLE IF NOT EXISTS cash_in_hand_entries (
             entry_id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -447,7 +460,13 @@ def _sqlite_ddl(conn):
             action     TEXT,
             old_value  TEXT,
             new_value  TEXT,
-            changed_at TEXT DEFAULT (datetime('now'))
+            ts         TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
+        )""",
+        """CREATE TABLE IF NOT EXISTS login_attempts (
+            attempt_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip_address   TEXT,
+            attempted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+            success      INTEGER NOT NULL DEFAULT 0
         )""",
     ]
     for stmt in stmts:
@@ -473,6 +492,18 @@ def _sqlite_ddl(conn):
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_payments_passbook_entry
         ON payments (passbook_entry_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_stock_history_recorded_at
+        ON stock_history (recorded_at DESC)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_audit_log_table_ts
+        ON audit_log (table_name, ts DESC)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_time
+        ON login_attempts (ip_address, attempted_at)
     """)
     conn.commit()
 
@@ -569,6 +600,42 @@ def ensure_schema(conn=None):
                 CREATE INDEX IF NOT EXISTS idx_payments_passbook_entry
                 ON payments (passbook_entry_id)
             """)
+            # Batch 5 migrations
+            for _col_sql in [
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS cheque_number TEXT DEFAULT ''",
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS cheque_date TEXT DEFAULT ''",
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS deposit_firm TEXT DEFAULT ''",
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS cheque_status TEXT DEFAULT 'Pending'",
+                "ALTER TABLE passbook_entries ADD COLUMN IF NOT EXISTS cheque_number TEXT DEFAULT ''",
+                "ALTER TABLE passbook_entries ADD COLUMN IF NOT EXISTS cheque_date TEXT DEFAULT ''",
+                "ALTER TABLE passbook_opening_balance ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT ''",
+                "ALTER TABLE customer_transactions ADD COLUMN IF NOT EXISTS bill_sent REAL",
+                "ALTER TABLE customer_transactions ADD COLUMN IF NOT EXISTS brokerage_paid TEXT DEFAULT 'Unpaid'",
+                "ALTER TABLE customer_transactions ADD COLUMN IF NOT EXISTS grace_days INTEGER DEFAULT 35",
+                "ALTER TABLE customer_transactions ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT ''",
+                "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS ts TEXT",
+            ]:
+                conn.execute(_col_sql)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS login_attempts (
+                    attempt_id   SERIAL PRIMARY KEY,
+                    ip_address   TEXT,
+                    attempted_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    success      BOOLEAN NOT NULL DEFAULT FALSE
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_time
+                ON login_attempts (ip_address, attempted_at)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stock_history_recorded_at
+                ON stock_history (recorded_at DESC)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_audit_log_table_ts
+                ON audit_log (table_name, ts DESC)
+            """)
             conn.commit()
 
         # ── Seed stock categories & goods ──────────────────────
@@ -662,6 +729,17 @@ def ensure_schema(conn=None):
             conn.close()
 
 
+@_cache_resource
+def _ensure_schema_once():
+    """
+    Schema setup — guaranteed to run exactly once per Streamlit session.
+    Uses cache_resource so all reruns within a session skip the DB round-trip.
+    Call ensure_schema(conn=...) directly in tests.
+    """
+    ensure_schema()
+    return True
+
+
 def get_merged_goods(conn, base_areca: list, base_bp: list) -> dict:
     rows = conn.execute("""
         SELECT sc.category_name, sg.good_name
@@ -726,15 +804,90 @@ def reverse_unidentified_stock(conn, category_id: int, location: str,
           category_id, location))
 
 
+def _now_ts() -> str:
+    """
+    Current timestamp as an ISO-format string (YYYY-MM-DDTHH:MM:SS).
+    String format ensures correct lexicographic comparison in SQLite TEXT columns
+    and is accepted by PostgreSQL TEXT columns without type-casting issues.
+    """
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+
 def log_audit(conn, table_name: str, record_id: int, action: str,
               old_value: dict = None, new_value: dict = None):
+    ph = _db_ph(conn)
     conn.execute(
-        "INSERT INTO audit_log (table_name, record_id, action, old_value, new_value) "
-        "VALUES (%s, %s, %s, %s, %s)",
-        (table_name, record_id, action,
+        f"INSERT INTO audit_log (ts, table_name, record_id, action, old_value, new_value) "
+        f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph})",
+        (_now_ts(), table_name, record_id, action,
          json.dumps(old_value) if old_value is not None else None,
          json.dumps(new_value) if new_value is not None else None)
     )
+
+
+def record_login_attempt(ip: str, success: bool, conn=None) -> None:
+    """Record a login attempt. conn= is optional; omit to open/close automatically."""
+    _own = conn is None
+    if _own:
+        conn = get_conn()
+    ph = _db_ph(conn)
+    try:
+        conn.execute(
+            f"INSERT INTO login_attempts (ip_address, attempted_at, success) "
+            f"VALUES ({ph}, {ph}, {ph})",
+            (ip, _now_ts(), success)
+        )
+        if _own:
+            conn.commit()
+    finally:
+        if _own:
+            conn.close()
+
+
+def check_lockout(ip: str, max_attempts: int = 5, window_minutes: int = 15,
+                  conn=None) -> tuple:
+    """
+    Returns (is_locked, failed_count).
+    Locked when >= max_attempts failed attempts within the last window_minutes.
+    conn= is optional; omit to open/close automatically.
+    """
+    from datetime import datetime, timedelta
+    _own = conn is None
+    if _own:
+        conn = get_conn()
+    ph = _db_ph(conn)
+    cutoff = (datetime.now() - timedelta(minutes=window_minutes)).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS failed FROM login_attempts "
+            f"WHERE ip_address = {ph} AND success = {ph} AND attempted_at >= {ph}",
+            (ip, False, cutoff)
+        ).fetchone()
+        failed = int(row["failed"])
+        return (failed >= max_attempts, failed)
+    finally:
+        if _own:
+            conn.close()
+
+
+def purge_old_login_attempts(days: int = 7, conn=None) -> None:
+    """Remove login_attempts older than `days` days to keep the table small."""
+    from datetime import datetime, timedelta
+    _own = conn is None
+    if _own:
+        conn = get_conn()
+    ph = _db_ph(conn)
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        conn.execute(
+            f"DELETE FROM login_attempts WHERE attempted_at < {ph}", (cutoff,)
+        )
+        if _own:
+            conn.commit()
+    finally:
+        if _own:
+            conn.close()
 
 
 def log_stock_change(conn, category_name: str, good_name: str,

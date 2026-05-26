@@ -13,7 +13,7 @@ import time
 
 from utils.db import (
     pg_read_sql,
-    get_conn, ensure_schema, log_audit, deduct_stock_for_sale,
+    get_conn, _ensure_schema_once, log_audit, deduct_stock_for_sale,
     reverse_stock_for_bill_delete,
     get_all_brokers_cached, get_merged_goods_cached, invalidate_lookup_cache,
     INTEREST_RATE_PCT, DEFAULT_GRACE_DAYS, TXNS_PER_PAGE,
@@ -40,7 +40,7 @@ st.set_page_config(
 
 require_login()
 render_logout_button()
-ensure_schema()
+_ensure_schema_once()
 
 st.markdown(APP_CSS, unsafe_allow_html=True)
 if st.session_state.get("light_mode"):

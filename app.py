@@ -5,7 +5,7 @@ All feature logic lives in pages/ and shared utils live in utils/.
 """
 
 import streamlit as st
-from utils.db import ensure_schema
+from utils.db import _ensure_schema_once
 from utils.styles import get_dashboard_css, BRAND_BAR_HTML
 from utils.auth import require_login, render_logout_button
 
@@ -18,7 +18,7 @@ st.set_page_config(
 
 require_login()
 render_logout_button()
-ensure_schema()
+_ensure_schema_once()
 
 if "light_mode" not in st.session_state:
     st.session_state.light_mode = False

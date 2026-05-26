@@ -9,7 +9,7 @@ import pandas as pd
 from datetime import date
 
 from utils.db import (
-    get_conn, pg_read_sql, ensure_schema, log_stock_change, purge_old_stock_history,
+    get_conn, pg_read_sql, _ensure_schema_once, log_stock_change, purge_old_stock_history,
     invalidate_lookup_cache, ensure_good_at_all_locations, ensure_category_at_all_locations,
 )
 from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
@@ -45,7 +45,7 @@ st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
 # Stock tables are created and seeded by utils.db.ensure_schema(),
 # which is called here to guarantee tables exist if this page is
 # opened directly (without going through app.py first).
-ensure_schema()
+_ensure_schema_once()
 
 
 @st.cache_resource
@@ -607,26 +607,59 @@ elif st.session_state.stock_page == "category":
                         st.rerun()
 
                 # ── Stock history expander ────────────────────────
-                with st.expander("📋 Stock History — last 30 days", expanded=False):
-                    df_hist = pg_read_sql("""
-                        SELECT recorded_at, good_name, change_type,
-                               bags_before, bags_after, bags_change,
-                               kg_before, kg_after, kg_change, source
-                        FROM stock_history
-                        WHERE category_name = %s
-                          AND location      = %s
-                          AND recorded_at  >= to_char(NOW() - INTERVAL '30 days', 'YYYY-MM-DD HH24:MI:SS')
-                        ORDER BY recorded_at DESC
-                    """, conn, params=(cat_name, loc))
+                with st.expander("📋 Stock History", expanded=False):
+                    from datetime import datetime as _dt, timedelta as _td
+                    _hk = f"{cat_name}_{loc}"
+                    _hcols = st.columns([2, 2])
+                    with _hcols[0]:
+                        _hist_days = st.selectbox(
+                            "Period", options=[7, 30, 60, 90, 0],
+                            format_func=lambda d: f"Last {d} days" if d > 0 else "All time",
+                            index=1, key=f"hist_days_{_hk}")
+                    with _hcols[1]:
+                        _hist_limit = st.selectbox(
+                            "Show", options=[50, 100, 200, 500],
+                            index=1, key=f"hist_limit_{_hk}")
+                    _hist_cutoff = (
+                        (_dt.now() - _td(days=_hist_days)).strftime("%Y-%m-%d %H:%M:%S")
+                        if _hist_days > 0 else None
+                    )
+                    if _hist_cutoff:
+                        df_hist = pg_read_sql("""
+                            SELECT recorded_at, good_name, change_type,
+                                   bags_before, bags_after, bags_change,
+                                   kg_before, kg_after, kg_change, source
+                            FROM stock_history
+                            WHERE category_name = %s AND location = %s
+                              AND recorded_at >= %s
+                            ORDER BY recorded_at DESC LIMIT %s
+                        """, conn, params=(cat_name, loc, _hist_cutoff, _hist_limit))
+                        _total_cnt = int((conn.execute(
+                            "SELECT COUNT(*) AS cnt FROM stock_history "
+                            "WHERE category_name=%s AND location=%s AND recorded_at>=%s",
+                            (cat_name, loc, _hist_cutoff)).fetchone() or {"cnt": 0})["cnt"])
+                    else:
+                        df_hist = pg_read_sql("""
+                            SELECT recorded_at, good_name, change_type,
+                                   bags_before, bags_after, bags_change,
+                                   kg_before, kg_after, kg_change, source
+                            FROM stock_history
+                            WHERE category_name = %s AND location = %s
+                            ORDER BY recorded_at DESC LIMIT %s
+                        """, conn, params=(cat_name, loc, _hist_limit))
+                        _total_cnt = int((conn.execute(
+                            "SELECT COUNT(*) AS cnt FROM stock_history "
+                            "WHERE category_name=%s AND location=%s",
+                            (cat_name, loc)).fetchone() or {"cnt": 0})["cnt"])
                     if df_hist.empty:
                         st.markdown(
-                            '<div class="empty-state">No stock changes in the last 30 days.</div>',
+                            '<div class="empty-state">No stock changes in this period.</div>',
                             unsafe_allow_html=True)
                     else:
                         st.markdown(
                             f'<div style="font-size:0.72rem;color:#5a5448;'
                             f'margin-bottom:0.5rem">'
-                            f'{len(df_hist)} changes recorded in the last 30 days'
+                            f'Showing {len(df_hist)} of {_total_cnt} changes'
                             f'</div>',
                             unsafe_allow_html=True)
                         _BADGE_COLORS = {
