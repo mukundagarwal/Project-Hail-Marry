@@ -17,7 +17,8 @@ from utils.db import (
     pg_read_sql, get_conn, FIRM_SP, FIRM_MT, SRC_VENDOR_RTGS, SRC_VENDOR_UB,
     log_stock_change, add_unidentified_stock, reverse_unidentified_stock,
     get_all_vendors_cached, invalidate_lookup_cache,
-    ensure_good_at_all_locations)
+    ensure_good_at_all_locations, ensure_category_at_all_locations,
+    _ensure_schema_once)
 from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.formatters import fmt_inr, fmt_date, h, parse_slash_amount
 from utils.auth import require_login, render_logout_button
@@ -35,41 +36,7 @@ st.markdown(APP_CSS, unsafe_allow_html=True)
 if st.session_state.get("light_mode"):
     st.markdown(get_light_mode_css(), unsafe_allow_html=True)
 st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════
-#  DATABASE
-# ══════════════════════════════════════════════════════════════
-
-@st.cache_resource
-def _ensure_vendor_schema_once():
-    conn = get_conn()
-    try:
-        conn.execute("""CREATE TABLE IF NOT EXISTS vendors (
-            vendor_id   SERIAL PRIMARY KEY,
-            vendor_name TEXT NOT NULL UNIQUE)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS vendor_entries (
-            entry_id    SERIAL PRIMARY KEY,
-            vendor_id   INTEGER NOT NULL,
-            entry_date  TEXT    NOT NULL,
-            ledger_type TEXT    NOT NULL,
-            firm        TEXT,
-            entry_kind  TEXT    NOT NULL,
-            particulars TEXT    NOT NULL,
-            amount      DOUBLE PRECISION    NOT NULL,
-            good_id     INTEGER,
-            bags        INTEGER DEFAULT 0,
-            quantity_kg DOUBLE PRECISION    DEFAULT 0,
-            note        TEXT    DEFAULT '',
-            created_at  TEXT    DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (vendor_id) REFERENCES vendors(vendor_id),
-            FOREIGN KEY (good_id)   REFERENCES stock_goods(good_id))""")
-        conn.commit()
-    finally:
-        conn.close()
-
-
-_ensure_vendor_schema_once()
+_ensure_schema_once()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -172,11 +139,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                             "INSERT INTO stock_categories (category_name) VALUES (%s) "
                             "RETURNING category_id", (nm,))
                         _nc_id = _nc_row.fetchone()["category_id"]
-                        for _loc in ["Transport", "Shop", "Anandpuri"]:
-                            conn.execute(
-                                "INSERT INTO unidentified_stock "
-                                "(category_id, location, bags, quantity_kg) VALUES (%s,%s,0,0)",
-                                (_nc_id, _loc))
+                        ensure_category_at_all_locations(conn, _nc_id)
                         conn.commit()
                         st.success(f"Added '{nm}'")
                         st.rerun()

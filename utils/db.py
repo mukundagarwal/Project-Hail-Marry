@@ -67,6 +67,9 @@ BLACK_PEPPER_GOODS = [
 ]
 GOODS_OPTIONS = ARECA_NUT_GOODS + BLACK_PEPPER_GOODS
 
+# ── Stock locations ─────────────────────────────────────────────
+STOCK_LOCATIONS = ("Transport", "Shop", "Anandpuri", "Cold")
+
 
 class _PgConn:
     """
@@ -360,7 +363,8 @@ def _sqlite_ddl(conn):
             amount      REAL NOT NULL DEFAULT 0,
             bags        REAL,
             quantity_kg REAL,
-            good_id     INTEGER
+            good_id     INTEGER,
+            note        TEXT DEFAULT ''
         )""",
         """CREATE TABLE IF NOT EXISTS passbook_entries (
             entry_id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -539,7 +543,7 @@ def ensure_schema(conn=None):
 
     try:
         _today_iso = _date.today().isoformat()
-        _STOCK_LOCATIONS = ["Transport", "Shop", "Anandpuri", "Cold"]
+        _STOCK_LOCATIONS = STOCK_LOCATIONS
         _STOCK_SEEDS = {
             "Arecanut":     ARECA_NUT_GOODS,
             "Black Pepper": BLACK_PEPPER_GOODS,
@@ -627,6 +631,9 @@ def ensure_schema(conn=None):
             ]:
                 conn.execute(_col_sql)
             conn.execute("ALTER TABLE audit_log DROP COLUMN IF EXISTS created_at")
+            conn.execute(
+                "ALTER TABLE vendor_entries ADD COLUMN IF NOT EXISTS note TEXT DEFAULT ''"
+            )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS login_attempts (
                     attempt_id   SERIAL PRIMARY KEY,
@@ -1106,7 +1113,7 @@ def reverse_stock_for_bill_delete(conn, transaction_id: int) -> None:
                 )
 
 
-_ALL_STOCK_LOCATIONS = ["Transport", "Shop", "Anandpuri", "Cold"]
+_ALL_STOCK_LOCATIONS = STOCK_LOCATIONS
 
 
 def ensure_good_at_all_locations(conn, good_id: int) -> None:

@@ -11,12 +11,13 @@ from datetime import date
 from utils.db import (
     get_conn, pg_read_sql, _ensure_schema_once, log_stock_change, purge_old_stock_history,
     invalidate_lookup_cache, ensure_good_at_all_locations, ensure_category_at_all_locations,
+    STOCK_LOCATIONS,
 )
 from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.formatters import h, fmt_inr
 from utils.auth import require_login, render_logout_button
 
-LOCATIONS = ["Transport", "Shop", "Anandpuri", "Cold"]
+LOCATIONS = list(STOCK_LOCATIONS)
 
 LOC_ACCENT = {
     "Transport": {"color": "#d4864a", "bg": "#1e1208", "border": "#4a2800"},
