@@ -330,7 +330,7 @@ def _payment_popover(vendor_id: int, ledger_type: str, firm, conn):
                                      format="%.2f", key=f"pfa_{_k}")
             note_s = st.text_input(
                 "Note (optional)",
-                placeholder="e.g. part payment, cheque no. 12345, etc.",
+                placeholder="e.g. part payment, reference no., etc.",
                 key=f"pfnt_{_k}")
             if st.form_submit_button("💾 Save Payment", use_container_width=True):
                 if p_amt <= 0:
@@ -356,8 +356,8 @@ def _payment_popover(vendor_id: int, ledger_type: str, firm, conn):
                             conn.execute(
                                 "INSERT INTO passbook_entries "
                                 "(firm,entry_date,details,amount,txn_type,"
-                                " source_type,source_id) "
-                                "VALUES (%s,%s,%s,%s,'Debit',%s,%s)",
+                                " source_type,source_id,cheque_status) "
+                                "VALUES (%s,%s,%s,%s,'Debit',%s,%s,NULL)",
                                 (firm, str(p_date), _vname, p_amt, SRC_VENDOR_RTGS, new_eid))
                         # ── CASH IN HAND SYNC ──────────────────────────────
                         if ledger_type == "UB":

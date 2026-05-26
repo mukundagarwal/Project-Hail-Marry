@@ -634,6 +634,12 @@ def ensure_schema(conn=None):
             conn.execute(
                 "ALTER TABLE vendor_entries ADD COLUMN IF NOT EXISTS note TEXT DEFAULT ''"
             )
+            # Vendor RTGS payments are immediate bank transfers — clear any Pending
+            # cheque_status that was set by the old schema DEFAULT 'Pending'.
+            conn.execute(
+                "UPDATE passbook_entries SET cheque_status=NULL "
+                "WHERE source_type='VendorRTGS' AND cheque_status IS NOT NULL"
+            )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS login_attempts (
                     attempt_id   SERIAL PRIMARY KEY,

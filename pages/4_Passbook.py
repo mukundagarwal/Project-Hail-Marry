@@ -595,9 +595,10 @@ elif st.session_state.pb_page == "firm":
                     st.markdown(f'<div style="{_CELL};{row_bg}color:#8a8070">'
                                 f'{h(chq_no)}</div>', unsafe_allow_html=True)
 
-                # Status toggle
+                # Status toggle — only for cheque-eligible source types
+                _chq_eligible = src in (SRC_MANUAL, SRC_CUST_CHQ_TXN, SRC_CUST_CHQ_PMT)
                 with rcols[6]:
-                    if chq_st == CHQ_PENDING:
+                    if _chq_eligible and chq_st == CHQ_PENDING:
                         if st.button("⏳ Pending", key=f"pb_st_{eid}",
                                      use_container_width=True,
                                      help="Click to mark Cleared"):
@@ -605,7 +606,7 @@ elif st.session_state.pb_page == "firm":
                                 "UPDATE passbook_entries SET cheque_status=%s "
                                 "WHERE entry_id=%s", (CHQ_CLEARED, eid))
                             conn.commit(); st.rerun()
-                    elif chq_st == CHQ_CLEARED:
+                    elif _chq_eligible and chq_st == CHQ_CLEARED:
                         if st.button("✓ Cleared", key=f"pb_st_{eid}",
                                      use_container_width=True,
                                      help="Click to mark Pending"):
