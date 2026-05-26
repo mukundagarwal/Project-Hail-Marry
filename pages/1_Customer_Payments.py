@@ -1936,19 +1936,36 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                 _existing_cih = round(float(_existing_cih or 0), 2)
                                                 _sett_amount  = round(float(_p_to_save), 2)
                                                 _gap          = round(_sett_amount - _existing_cih, 2)
+                                                _sett_cih_row = conn.execute(
+                                                    "SELECT entry_id FROM cash_in_hand_entries "
+                                                    "WHERE source_type=%s AND source_id=%s",
+                                                    (SRC_CUSTOMER_CASH, tid)).fetchone()
+                                                _cih_detail = (
+                                                    f"Cash from {_bn4} "
+                                                    f"(Txn: {fmt_date(str(txn['date']))})"
+                                                )
                                                 if _gap > 0.01:
-                                                    conn.execute("""
-                                                        INSERT INTO cash_in_hand_entries
-                                                            (entry_date, details, amount, txn_type,
-                                                             source_type, source_id)
-                                                        VALUES (%s, %s, %s, 'Credit', %s, %s)
-                                                    """, (
-                                                        str(settle_date_input),
-                                                        f"Cash from {_bn4} (Txn: {fmt_date(str(txn['date']))})",
-                                                        _gap,
-                                                        SRC_CUSTOMER_CASH,
-                                                        tid
-                                                    ))
+                                                    if _sett_cih_row:
+                                                        conn.execute(
+                                                            "UPDATE cash_in_hand_entries "
+                                                            "SET amount=%s, entry_date=%s, details=%s "
+                                                            "WHERE source_type=%s AND source_id=%s",
+                                                            (_gap, str(settle_date_input),
+                                                             _cih_detail,
+                                                             SRC_CUSTOMER_CASH, tid))
+                                                    else:
+                                                        conn.execute(
+                                                            "INSERT INTO cash_in_hand_entries "
+                                                            "(entry_date, details, amount, txn_type,"
+                                                            " source_type, source_id) "
+                                                            "VALUES (%s, %s, %s, 'Credit', %s, %s)",
+                                                            (str(settle_date_input), _cih_detail,
+                                                             _gap, SRC_CUSTOMER_CASH, tid))
+                                                elif _sett_cih_row:
+                                                    conn.execute(
+                                                        "DELETE FROM cash_in_hand_entries "
+                                                        "WHERE source_type=%s AND source_id=%s",
+                                                        (SRC_CUSTOMER_CASH, tid))
                                             # ── END CASH IN HAND SYNC ────────────────────────────────
                                         _overpay_note = ""
                                         if round(r["final_balance_due"], 2) <= 0:
