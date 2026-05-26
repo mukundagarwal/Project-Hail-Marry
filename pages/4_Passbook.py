@@ -416,7 +416,7 @@ elif st.session_state.pb_page == "firm":
             _prev_amt  = float(ob_row["opening_amount"]) if ob_row else 0.0
             _prev_date = (date.fromisoformat(str(ob_row["opening_date"]))
                           if ob_row else date.today())
-            _prev_note = ob_row["notes"] if ob_row else ""
+            _prev_note = (ob_row["notes"] or "") if ob_row else ""
 
             st.markdown(
                 '<div style="background:#181610;border:1px solid #2a2820;'
@@ -446,7 +446,7 @@ elif st.session_state.pb_page == "firm":
                                 "opening_amount=excluded.opening_amount,"
                                 "opening_date=excluded.opening_date,"
                                 "notes=excluded.notes",
-                                (firm, _oa, str(ob_date), ob_note.strip()))
+                                (firm, _oa, str(ob_date), (ob_note or "").strip()))
                             conn.execute("""
                                 INSERT INTO passbook_entries
                                     (firm, entry_date, details, amount, txn_type, source_type)
@@ -849,7 +849,7 @@ elif st.session_state.pb_page == "firm":
                                 value=date.fromisoformat(str(row["entry_date"])),
                                 key=f"pb_efd_{eid}")
                             ne_det  = st.text_input(
-                                "Details", value=str(row["details"]),
+                                "Details", value=str(row["details"] or ""),
                                 key=f"pb_efdet_{eid}")
                         with ef2:
                             ne_amt  = st.number_input(
@@ -1105,7 +1105,7 @@ elif st.session_state.pb_page == "cash":
             _prev_amt  = float(ob_row["opening_amount"]) if ob_row else 0.0
             _prev_date = (date.fromisoformat(str(ob_row["opening_date"]))
                           if ob_row else date.today())
-            _prev_note = ob_row["notes"] if ob_row else ""
+            _prev_note = (ob_row["notes"] or "") if ob_row else ""
 
             st.markdown(
                 '<div style="background:#181610;border:1px solid #2a2820;'
@@ -1140,7 +1140,7 @@ elif st.session_state.pb_page == "cash":
                         "opening_amount=excluded.opening_amount,"
                         "opening_date=excluded.opening_date,"
                         "notes=excluded.notes",
-                        (_coa, str(cob_date), cob_note.strip()))
+                        (_coa, str(cob_date), (cob_note or "").strip()))
                     conn.execute("""
                         INSERT INTO cash_in_hand_entries
                             (entry_date, details, amount, txn_type, source_type)
@@ -1312,7 +1312,7 @@ elif st.session_state.pb_page == "cash":
                             value=date.fromisoformat(str(crow["entry_date"])),
                             key=f"cih_efd_{ceid}")
                         cne_det  = st.text_input(
-                            "Details", value=str(crow["details"]),
+                            "Details", value=str(crow["details"] or ""),
                             key=f"cih_efdet_{ceid}")
                     with cef2:
                         cne_amt  = st.number_input(
