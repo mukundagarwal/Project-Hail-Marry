@@ -16,6 +16,9 @@ from utils.db import (
     get_conn, _ensure_schema_once, log_audit, deduct_stock_for_sale,
     reverse_stock_for_bill_delete,
     get_all_brokers_cached, get_merged_goods_cached, invalidate_lookup_cache,
+    get_cached_home_stats, get_cached_overdue_map,
+    get_cached_transactions_for_broker, get_cached_ledger_stats,
+    invalidate_customer_cache,
     INTEREST_RATE_PCT, DEFAULT_GRACE_DAYS, TXNS_PER_PAGE,
     GOODS_OPTIONS, ARECA_NUT_GOODS, BLACK_PEPPER_GOODS,
     FIRM_SP, FIRM_MT, FIRMS,
@@ -186,37 +189,25 @@ if st.session_state.page == "customer":
     st.markdown('<div class="page-title">Customer Payments</div>', unsafe_allow_html=True)
     st.markdown('<div class="page-sub">Broker directory</div>', unsafe_allow_html=True)
 
+    _today_str = date.today().isoformat()
+    _hs = get_cached_home_stats(_today_str)
+    n_b  = int(_hs.get("n_b", 0))
+    n_t  = int(_hs.get("n_t", 0))
+    rev  = float(_hs.get("rev", 0))
+    pend = float(_hs.get("pend", 0))
+    st.markdown(f'<div class="stat-row">'
+                f'<div class="stat-pill"><span class="sp-label">Brokers</span>'
+                f'<span class="sp-value">{int(n_b)}</span><span class="sp-sub">in directory</span></div>'
+                f'<div class="stat-pill"><span class="sp-label">Transactions</span>'
+                f'<span class="sp-value">{int(n_t)}</span></div>'
+                f'<div class="stat-pill"><span class="sp-label">Total Revenue</span>'
+                f'<span class="sp-value">{fmt_inr(rev)}</span></div>'
+                f'<div class="stat-pill"><span class="sp-label">Pending Dues</span>'
+                f'<span class="sp-value" style="color:#d4864a">{fmt_inr(pend)}</span></div></div>',
+                unsafe_allow_html=True)
+
     conn = get_conn()
     try:
-        _stats = pg_read_sql("""
-            SELECT
-                (SELECT COUNT(*) FROM brokers)                               AS n_b,
-                COUNT(*)                                                     AS n_t,
-                COALESCE(SUM(ct.total_amount), 0)                           AS rev,
-                COALESCE(SUM(ct.total_amount - COALESCE(p.paid, 0))
-                    FILTER (WHERE ct.payment_status IN ('Pending','Partial')),
-                    0)                                                       AS pend
-            FROM customer_transactions ct
-            LEFT JOIN (
-                SELECT transaction_id, SUM(amount) AS paid
-                FROM payments GROUP BY transaction_id
-            ) p ON ct.transaction_id = p.transaction_id
-        """, conn).fillna(0)
-        n_b  = int(_stats.iloc[0]["n_b"])
-        n_t  = int(_stats.iloc[0]["n_t"])
-        rev  = float(_stats.iloc[0]["rev"])
-        pend = float(_stats.iloc[0]["pend"])
-        st.markdown(f'<div class="stat-row">'
-                    f'<div class="stat-pill"><span class="sp-label">Brokers</span>'
-                    f'<span class="sp-value">{int(n_b)}</span><span class="sp-sub">in directory</span></div>'
-                    f'<div class="stat-pill"><span class="sp-label">Transactions</span>'
-                    f'<span class="sp-value">{int(n_t)}</span></div>'
-                    f'<div class="stat-pill"><span class="sp-label">Total Revenue</span>'
-                    f'<span class="sp-value">{fmt_inr(rev)}</span></div>'
-                    f'<div class="stat-pill"><span class="sp-label">Pending Dues</span>'
-                    f'<span class="sp-value" style="color:#d4864a">{fmt_inr(pend)}</span></div></div>',
-                    unsafe_allow_html=True)
-
         s1, s2 = st.columns([3, 1], gap="small")
         with s1:
             search = st.text_input("", placeholder="🔍  Search broker name...", label_visibility="collapsed")
@@ -236,6 +227,7 @@ if st.session_state.page == "customer":
                                              (next_id, name_clean))
                                 conn.commit()
                                 invalidate_lookup_cache()
+                                invalidate_customer_cache()
                                 st.toast(f"Broker '{name_clean}' added.", icon="✅")
                                 st.rerun()
                             except psycopg2.IntegrityError:
@@ -247,20 +239,7 @@ if st.session_state.page == "customer":
         if search:
             df_b = df_b[df_b["broker_name"].str.contains(search, case=False, na=False)]
 
-        _today_str = date.today().isoformat()
-        df_ov = pg_read_sql("""
-            SELECT ct.broker_id, COUNT(*) AS overdue_count
-            FROM customer_transactions ct
-            LEFT JOIN (
-                SELECT transaction_id, SUM(amount) AS paid
-                FROM payments GROUP BY transaction_id
-            ) p ON ct.transaction_id = p.transaction_id
-            WHERE ct.payment_status IN ('Pending','Partial')
-              AND (%s::date - ct.date::date) > 60
-              AND (ct.total_amount - COALESCE(p.paid, 0)) >= 0.075 * ct.total_amount
-            GROUP BY ct.broker_id""",
-            conn, params=(_today_str,))
-        overdue_map = dict(zip(df_ov["broker_id"], df_ov["overdue_count"]))
+        overdue_map = get_cached_overdue_map(_today_str)
 
         if df_b.empty:
             st.markdown('<div class="empty-state"><div class="es-icon">📭</div>No brokers found.</div>',
@@ -289,6 +268,7 @@ if st.session_state.page == "customer":
                                                  (row["broker_id"],))
                                     conn.commit()
                                     invalidate_lookup_cache()
+                                    invalidate_customer_cache()
                                     st.rerun()
                                 except psycopg2.IntegrityError:
                                     conn.rollback()
@@ -329,28 +309,11 @@ elif st.session_state.page == "ledger":
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
+    _today_iso = date.today().isoformat()
+    stats = get_cached_ledger_stats(bid, _today_iso)
+
     conn = get_conn()
     try:
-        _today_iso = date.today().isoformat()
-
-        stats = pg_read_sql("""
-            SELECT COUNT(*) cnt,
-                COALESCE(SUM(ct.total_amount),0) total,
-                COALESCE(SUM(CASE WHEN ct.payment_status='Pending' THEN ct.total_amount ELSE 0 END),0) pending,
-                COALESCE(SUM(CASE WHEN ct.payment_status='Paid'    THEN ct.total_amount ELSE 0 END),0) paid,
-                COALESCE(SUM(CASE WHEN ct.final_settlement IS NOT NULL THEN ct.final_settlement ELSE 0 END),0) settled,
-                COALESCE(SUM(CASE WHEN ct.calc_status='Pending' THEN 1 ELSE 0 END),0) uncalc,
-                COALESCE(SUM(CASE WHEN ct.payment_status IN ('Pending','Partial')
-                    AND (%s::date - ct.date::date) > 60
-                    AND (ct.total_amount - COALESCE(p.paid, 0)) >= 0.075 * ct.total_amount
-                    THEN 1 ELSE 0 END),0) overdue_cnt
-            FROM customer_transactions ct
-            LEFT JOIN (
-                SELECT transaction_id, SUM(amount) AS paid
-                FROM payments GROUP BY transaction_id
-            ) p ON ct.transaction_id = p.transaction_id
-            WHERE ct.broker_id=%s""",
-            conn, params=(_today_iso, bid)).iloc[0]
 
         st.markdown(f"""
         <div class="ledger-header">
@@ -652,6 +615,7 @@ elif st.session_state.page == "ledger":
                                             st.session_state.pop(_k, None)
                                         for _sw in stock_warns:
                                             st.warning(_sw)
+                                        invalidate_customer_cache()
                                         st.success("Bill saved — stock updated."); st.rerun()
                     with sv2:
                         if st.button("✕  Clear Cart", use_container_width=True, key="clear_cart_btn"):
@@ -851,16 +815,8 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
-        # ── FETCH + FILTER TRANSACTIONS ──────────────────────────
-        df_t = pg_read_sql("""
-            SELECT ct.*, COALESCE(p.paid, 0) AS total_paid
-            FROM customer_transactions ct
-            LEFT JOIN (
-                SELECT transaction_id, SUM(amount) AS paid
-                FROM payments GROUP BY transaction_id
-            ) p ON ct.transaction_id = p.transaction_id
-            WHERE ct.broker_id=%s ORDER BY ct.date ASC""",
-            conn, params=(bid,))
+        # ── FETCH + FILTER TRANSACTIONS (cached) ─────────────────
+        df_t = pd.DataFrame(get_cached_transactions_for_broker(bid))
         if fmode == "Single Date":
             df_t = df_t[df_t["date"] == str(st.session_state.filter_single)]
         elif fmode == "Date Range":
@@ -1230,6 +1186,8 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                             "UPDATE customer_transactions SET payment_status=%s,"
                                             "calc_status='Pending',final_settlement=NULL,interest_amount=0 "
                                             "WHERE transaction_id=%s", (new_st, tid))
+                                    clear_passbook_cache()
+                                    invalidate_customer_cache()
                                     st.rerun()
 
                             if st.session_state[edit_pmt_key]:
@@ -1386,6 +1344,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                     st.session_state[edit_pmt_key] = False
                                                     st.success(f"Payment #{pid_p} updated. Please recalculate.")
                                                     clear_passbook_cache()
+                                                    invalidate_customer_cache()
                                                     st.rerun()
                                             except (ValueError, InvalidOperation) as e:
                                                 st.error(f"Invalid amount: {e}")
@@ -1525,6 +1484,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                             st.session_state[log_pmt_key] = False
                                             st.success(f"Payment of {fmt_inr(p_amt)} saved!")
                                             clear_passbook_cache()
+                                            invalidate_customer_cache()
                                             st.rerun()
                                       except (ValueError, InvalidOperation) as e:
                                           st.error(f"Invalid amount: {e}")
@@ -1574,6 +1534,8 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                     conn.execute("DELETE FROM payments WHERE transaction_id=%s", (tid,))
                                     conn.execute("DELETE FROM transaction_items WHERE transaction_id=%s", (tid,))
                                     conn.execute("DELETE FROM customer_transactions WHERE transaction_id=%s", (tid,))
+                                clear_passbook_cache()
+                                invalidate_customer_cache()
                                 st.rerun()
                         with b3:
                             if has_settle:
@@ -1590,6 +1552,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                 conn.execute(
                                     "UPDATE customer_transactions SET brokerage_paid=%s WHERE transaction_id=%s",
                                     ("Paid" if brok_paid == "Unpaid" else "Unpaid", tid))
+                                invalidate_customer_cache()
                                 conn.commit(); st.rerun()
 
                     # ── VIEW BILL ─────────────────────────────────
@@ -1996,6 +1959,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                             st.session_state.sum_intercept.remove(tid)
                                         st.success(f"✓ Settlement {fmt_inr(r['final_balance_due'])} saved.{_overpay_note}")
                                         clear_passbook_cache()
+                                        invalidate_customer_cache()
                                         st.rerun()
                             with sc2:
                                 if st.button("Cancel", key=f"cancel_calc_{tid}", use_container_width=True):
@@ -2050,6 +2014,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                             "bill_sent=%s WHERE transaction_id=%s",
                                             (u_name, str(u_date), u_status, _u_bs_save, tid))
                                         conn.commit()
+                                        invalidate_customer_cache()
                                         st.session_state[edit_key] = False; st.rerun()
                             with fc2:
                                 if st.form_submit_button("Cancel", use_container_width=True):

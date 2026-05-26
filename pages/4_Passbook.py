@@ -21,6 +21,7 @@ from utils.db import (
     SRC_CUSTOMER_CASH, SRC_VENDOR_UB, SRC_CIH_OPENING,
     CHQ_PENDING, CHQ_CLEARED,
     TXNS_PER_PAGE,
+    get_cached_customer_names,
 )
 from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.formatters import fmt_inr, fmt_date, h, days_between
@@ -354,7 +355,7 @@ elif st.session_state.pb_view == "firm":
             # For Credits: searchable selectbox with customer names + Suspense default.
             # For Debits: plain text input.
             if a_type == "Credit":
-                _all_custs    = _get_all_customers(conn)
+                _all_custs    = get_cached_customer_names()
                 _detail_opts  = ["Suspense", "Type new name..."] + _all_custs
                 a_details_sel = st.selectbox(
                     "Customer / Details",

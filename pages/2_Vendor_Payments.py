@@ -16,7 +16,9 @@ from datetime import date
 from utils.db import (
     pg_read_sql, get_conn, FIRM_SP, FIRM_MT, SRC_VENDOR_RTGS, SRC_VENDOR_UB,
     log_stock_change, add_unidentified_stock, reverse_unidentified_stock,
-    get_all_vendors_cached, invalidate_lookup_cache,
+    get_all_vendors_cached, invalidate_lookup_cache, invalidate_vendor_cache,
+    get_cached_vendor_home_stats, get_cached_vendor_balances,
+    get_cached_stock_categories, get_cached_goods_for_category,
     ensure_good_at_all_locations, ensure_category_at_all_locations,
     BANK_ACCOUNTS, DEFAULT_BANK_ACCOUNT,
     _ensure_schema_once)
@@ -115,9 +117,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
         b_date = st.date_input("Bill Date", value=date.today(), key=f"bfd_{_k}")
 
         # Goods category dropdown
-        cats = conn.execute(
-            "SELECT category_id, category_name "
-            "FROM stock_categories ORDER BY category_name").fetchall()
+        cats = get_cached_stock_categories()
         cat_names = [r["category_name"] for r in cats]
         cat_ids   = [r["category_id"] for r in cats]
 
@@ -149,10 +149,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                         st.error("Category already exists.")
 
         # Goods name — optional; "— Not specified —" means category-only or no goods info
-        _goods_raw = (conn.execute(
-            "SELECT good_id, good_name FROM stock_goods "
-            "WHERE category_id=%s ORDER BY good_name", (sel_cat_id,)).fetchall()
-            if sel_cat_id else [])
+        _goods_raw = get_cached_goods_for_category(sel_cat_id) if sel_cat_id else []
         _good_opt_labels = ["— Not specified —"] + [r["good_name"] for r in _goods_raw]
         _good_opt_ids    = [None] + [r["good_id"] for r in _goods_raw]
 
@@ -273,6 +270,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                                 import logging
                                 logging.getLogger(__name__).warning(
                                     "stock_history log failed: %s", _e)
+                        invalidate_vendor_cache()
                         st.success(f"Bill of {fmt_inr(amt)} saved. Transport stock updated.")
                         st.rerun()
 
@@ -304,6 +302,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                             import logging
                             logging.getLogger(__name__).warning(
                                 "Unidentified stock update failed: %s", _e)
+                    invalidate_vendor_cache()
                     st.success(f"Bill of {fmt_inr(amt)} saved. Unidentified stock updated.")
                     st.rerun()
 
@@ -317,6 +316,7 @@ def _bill_popover(vendor_id: int, ledger_type: str, firm, conn):
                             (vendor_id, str(b_date), ledger_type, firm,
                              "Bill", sel_cat_name, -amt,
                              None, 0, 0.0, note_s.strip()))
+                    invalidate_vendor_cache()
                     st.success(f"Bill of {fmt_inr(amt)} saved.")
                     st.rerun()
 
@@ -378,6 +378,7 @@ def _payment_popover(vendor_id: int, ledger_type: str, firm, conn):
                                 (str(p_date), _vname, p_amt, 'Debit', SRC_VENDOR_UB, new_eid))
                     st.toast(f"Payment of {fmt_inr(p_amt)} recorded.", icon="✅")
                     clear_passbook_cache()
+                    invalidate_vendor_cache()
                     st.rerun()
 
 
@@ -433,6 +434,7 @@ def _edit_form(entry_row, conn):
                 st.session_state[f"vp_edit_{entry_id}"] = False
                 if warn:
                     st.warning(warn)
+                invalidate_vendor_cache()
                 st.success("Bill updated (stock may be negative).")
                 st.rerun()
         with _sa2:
@@ -652,6 +654,7 @@ def _edit_form(entry_row, conn):
                         st.session_state[f"vp_edit_{entry_id}"] = False
                         if warn:
                             st.warning(warn)
+                        invalidate_vendor_cache()
                         st.success("Bill updated.")
                         st.rerun()
                 else:
@@ -674,6 +677,8 @@ def _edit_form(entry_row, conn):
                                 "WHERE source_type=%s AND source_id=%s",
                                 (str(new_date), new_amt, SRC_VENDOR_UB, entry_id))
                     st.session_state[f"vp_edit_{entry_id}"] = False
+                    clear_passbook_cache()
+                    invalidate_vendor_cache()
                     st.success("Payment updated.")
                     st.rerun()
 
@@ -729,6 +734,8 @@ def _delete_confirm(entry_row, conn):
                         "WHERE source_type=%s AND source_id=%s",
                         (SRC_VENDOR_UB, entry_id))
                 conn.execute("DELETE FROM vendor_entries WHERE entry_id=%s", (entry_id,))
+            clear_passbook_cache()
+            invalidate_vendor_cache()
             st.session_state[f"vp_del_{entry_id}"] = False
             st.rerun()
     with dc2:
@@ -886,22 +893,16 @@ if st.session_state.vp_page == "home":
     st.markdown('<div class="page-title">Vendor Payments</div>', unsafe_allow_html=True)
     st.markdown('<div class="page-sub">Vendor directory</div>', unsafe_allow_html=True)
 
+    _vs = get_cached_vendor_home_stats()
+    n_vendors = int(_vs["n_vendors"])
+    tot_bills = float(_vs["tot_bills"])
+    tot_pmts  = float(_vs["tot_pmts"])
+    net_bal   = round(float(_vs["net_bal"]), 2)
+
     conn = get_conn()
     # row_factory not needed with psycopg2 RealDictCursor
 
     try:
-        _vs = conn.execute("""
-            SELECT
-                (SELECT COUNT(*) FROM vendors)                              AS n_vendors,
-                COALESCE(SUM(amount) FILTER (WHERE amount < 0), 0)         AS tot_bills,
-                COALESCE(SUM(amount) FILTER (WHERE amount > 0), 0)         AS tot_pmts,
-                COALESCE(SUM(amount), 0)                                   AS net_bal
-            FROM vendor_entries
-        """).fetchone()
-        n_vendors = int(_vs["n_vendors"])
-        tot_bills = float(_vs["tot_bills"])
-        tot_pmts  = float(_vs["tot_pmts"])
-        net_bal   = round(float(_vs["net_bal"]), 2)
 
         st.markdown(
             f'<div class="stat-row">'
@@ -956,11 +957,7 @@ if st.session_state.vp_page == "home":
                 'No vendors yet. Add one to get started.</div>',
                 unsafe_allow_html=True)
         else:
-            df_bal_q = pg_read_sql(
-                "SELECT vendor_id, ROUND(SUM(amount)::numeric,2) bal "
-                "FROM vendor_entries GROUP BY vendor_id", conn)
-            bal_map = dict(zip(df_bal_q["vendor_id"].astype(int),
-                               df_bal_q["bal"].astype(float)))
+            bal_map = {int(k): float(v) for k, v in get_cached_vendor_balances().items()}
 
             for chunk in [df_v.iloc[i:i+2] for i in range(0, len(df_v), 2)]:
                 g1, g2 = st.columns(2, gap="medium")
@@ -1053,6 +1050,8 @@ if st.session_state.vp_page == "home":
                                         conn.execute(
                                             "DELETE FROM vendors WHERE vendor_id=%s", (vid,))
                                     invalidate_lookup_cache()
+                                    invalidate_vendor_cache()
+                                    clear_passbook_cache()
                                     st.session_state.pop(f"vp_del_vendor_{vid}", None)
                                     st.rerun()
                             with dc2:

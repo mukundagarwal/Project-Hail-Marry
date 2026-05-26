@@ -231,9 +231,13 @@ def pg_read_sql(sql, conn, params=None):
 try:
     import streamlit as _st_mod
     _cache_ttl_300    = _st_mod.cache_data(ttl=300, show_spinner=False)
+    _cache_ttl_60     = _st_mod.cache_data(ttl=60,  show_spinner=False)
+    _cache_ttl_30     = _st_mod.cache_data(ttl=30,  show_spinner=False)
     _cache_resource   = _st_mod.cache_resource
 except Exception:
     _cache_ttl_300    = lambda f: f   # identity — tests / non-Streamlit contexts
+    _cache_ttl_60     = lambda f: f
+    _cache_ttl_30     = lambda f: f
     _cache_resource   = lambda f: f
 
 
@@ -273,18 +277,198 @@ def get_merged_goods_cached():
         conn.close()
 
 
+@_cache_ttl_60
+def get_cached_home_stats(today_iso: str) -> dict:
+    """Customer home-page aggregate stats (60s cache). today_iso is the cache-key discriminator."""
+    conn = get_conn()
+    try:
+        row = conn.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM brokers) AS n_b,
+                COUNT(*) AS n_t,
+                COALESCE(SUM(ct.total_amount), 0) AS rev,
+                COALESCE(SUM(ct.total_amount - COALESCE(p.paid, 0))
+                    FILTER (WHERE ct.payment_status IN ('Pending','Partial')), 0) AS pend
+            FROM customer_transactions ct
+            LEFT JOIN (
+                SELECT transaction_id, SUM(amount) AS paid
+                FROM payments GROUP BY transaction_id
+            ) p ON ct.transaction_id = p.transaction_id
+        """).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+@_cache_ttl_60
+def get_cached_overdue_map(today_iso: str) -> dict:
+    """Overdue-count per broker_id (60s cache)."""
+    conn = get_conn()
+    try:
+        rows = conn.execute("""
+            SELECT ct.broker_id, COUNT(*) AS overdue_count
+            FROM customer_transactions ct
+            LEFT JOIN (
+                SELECT transaction_id, SUM(amount) AS paid
+                FROM payments GROUP BY transaction_id
+            ) p ON ct.transaction_id = p.transaction_id
+            WHERE ct.payment_status IN ('Pending','Partial')
+              AND (%s::date - ct.date::date) > 60
+              AND (ct.total_amount - COALESCE(p.paid, 0)) >= 0.075 * ct.total_amount
+            GROUP BY ct.broker_id
+        """, (today_iso,)).fetchall()
+        return {int(r["broker_id"]): int(r["overdue_count"]) for r in rows}
+    finally:
+        conn.close()
+
+
+@_cache_ttl_30
+def get_cached_transactions_for_broker(broker_id: int) -> list:
+    """All transactions + total_paid for a broker (30s cache). Invalidate on any write."""
+    conn = get_conn()
+    try:
+        rows = conn.execute("""
+            SELECT ct.*, COALESCE(p.paid, 0) AS total_paid
+            FROM customer_transactions ct
+            LEFT JOIN (
+                SELECT transaction_id, SUM(amount) AS paid
+                FROM payments GROUP BY transaction_id
+            ) p ON ct.transaction_id = p.transaction_id
+            WHERE ct.broker_id=%s ORDER BY ct.date ASC
+        """, (broker_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_cache_ttl_30
+def get_cached_ledger_stats(broker_id: int, today_iso: str) -> dict:
+    """Ledger header stats for a broker (30s cache)."""
+    conn = get_conn()
+    try:
+        row = conn.execute("""
+            SELECT COUNT(*) cnt,
+                COALESCE(SUM(ct.total_amount),0) total,
+                COALESCE(SUM(CASE WHEN ct.payment_status='Pending' THEN ct.total_amount ELSE 0 END),0) pending,
+                COALESCE(SUM(CASE WHEN ct.payment_status='Paid' THEN ct.total_amount ELSE 0 END),0) paid,
+                COALESCE(SUM(CASE WHEN ct.final_settlement IS NOT NULL THEN ct.final_settlement ELSE 0 END),0) settled,
+                COALESCE(SUM(CASE WHEN ct.calc_status='Pending' THEN 1 ELSE 0 END),0) uncalc,
+                COALESCE(SUM(CASE WHEN ct.payment_status IN ('Pending','Partial')
+                    AND (%s::date - ct.date::date) > 60
+                    AND (ct.total_amount - COALESCE(p.paid, 0)) >= 0.075 * ct.total_amount
+                    THEN 1 ELSE 0 END),0) overdue_cnt
+            FROM customer_transactions ct
+            LEFT JOIN (
+                SELECT transaction_id, SUM(amount) AS paid
+                FROM payments GROUP BY transaction_id
+            ) p ON ct.transaction_id = p.transaction_id
+            WHERE ct.broker_id=%s
+        """, (today_iso, broker_id)).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+@_cache_ttl_60
+def get_cached_vendor_home_stats() -> dict:
+    """Vendor home-page aggregate stats (60s cache)."""
+    conn = get_conn()
+    try:
+        row = conn.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM vendors) AS n_vendors,
+                COALESCE(SUM(amount) FILTER (WHERE amount < 0), 0) AS tot_bills,
+                COALESCE(SUM(amount) FILTER (WHERE amount > 0), 0) AS tot_pmts,
+                COALESCE(SUM(amount), 0) AS net_bal
+            FROM vendor_entries
+        """).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+@_cache_ttl_30
+def get_cached_vendor_balances() -> dict:
+    """Balance per vendor_id (30s cache)."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT vendor_id, ROUND(SUM(amount)::numeric,2) bal "
+            "FROM vendor_entries GROUP BY vendor_id"
+        ).fetchall()
+        return {int(r["vendor_id"]): float(r["bal"]) for r in rows}
+    finally:
+        conn.close()
+
+
+@_cache_ttl_300
+def get_cached_stock_categories() -> list:
+    """All stock categories sorted by name (5 min cache)."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT category_id, category_name FROM stock_categories ORDER BY category_name"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_cache_ttl_300
+def get_cached_goods_for_category(category_id: int) -> list:
+    """Goods for a category sorted by name (5 min cache)."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT good_id, good_name FROM stock_goods "
+            "WHERE category_id=%s ORDER BY good_name", (category_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_cache_ttl_300
+def get_cached_customer_names() -> list:
+    """Distinct customer names sorted (5 min cache). Used for passbook Add Transaction."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT customer_name FROM customer_transactions ORDER BY customer_name"
+        ).fetchall()
+        return [r["customer_name"] for r in rows]
+    finally:
+        conn.close()
+
+
 def invalidate_lookup_cache():
     """Clear all 5-minute lookup caches. Call after any write to brokers, vendors, or goods."""
-    # Call after any write to: brokers, vendors, stock_goods, stock_categories
-    # Callers (update this list when adding new write paths):
-    #   pages/1_Customer_Payments.py  — add_broker, delete_broker
-    #   pages/2_Vendor_Payments.py    — add_vendor, delete_vendor, add_good (bill form)
-    #   pages/3_Stock_Register.py     — add_category, add_good, edit_good, delete_good
-    for _fn in (get_all_brokers_cached, get_all_vendors_cached, get_merged_goods_cached):
+    for _fn in (get_all_brokers_cached, get_all_vendors_cached, get_merged_goods_cached,
+                get_cached_stock_categories, get_cached_goods_for_category,
+                get_cached_customer_names):
         try:
             _fn.clear()
         except Exception:
-            pass
+            continue
+
+
+def invalidate_customer_cache():
+    """Clear customer/broker transaction caches. Call before st.rerun() after any write."""
+    for _fn in (get_cached_home_stats, get_cached_overdue_map,
+                get_cached_transactions_for_broker, get_cached_ledger_stats):
+        try:
+            _fn.clear()
+        except Exception:
+            continue
+
+
+def invalidate_vendor_cache():
+    """Clear vendor entry caches. Call before st.rerun() after any vendor write."""
+    for _fn in (get_cached_vendor_home_stats, get_cached_vendor_balances):
+        try:
+            _fn.clear()
+        except Exception:
+            continue
 
 
 def _db_ph(conn) -> str:
