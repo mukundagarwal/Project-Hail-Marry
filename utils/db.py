@@ -794,29 +794,33 @@ def get_merged_goods(conn, base_areca: list, base_bp: list) -> dict:
 def add_unidentified_stock(conn, category_id: int, location: str,
                             bags: float, quantity_kg: float) -> None:
     """Add bags/kg to the unidentified_stock row for this category+location (upsert)."""
-    conn.execute("""
-        INSERT INTO unidentified_stock
-            (category_id, location, bags, quantity_kg)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT(category_id, location) DO UPDATE SET
-            bags        = unidentified_stock.bags        + excluded.bags,
-            quantity_kg = unidentified_stock.quantity_kg + excluded.quantity_kg
-    """, (category_id, location,
-          round(float(bags), 2),
-          round(float(quantity_kg), 2)))
+    ph = _db_ph(conn)
+    conn.execute(
+        f"INSERT INTO unidentified_stock"
+        f"    (category_id, location, bags, quantity_kg)"
+        f" VALUES ({ph}, {ph}, {ph}, {ph})"
+        f" ON CONFLICT(category_id, location) DO UPDATE SET"
+        f"     bags        = unidentified_stock.bags        + excluded.bags,"
+        f"     quantity_kg = unidentified_stock.quantity_kg + excluded.quantity_kg",
+        (category_id, location,
+         round(float(bags), 2),
+         round(float(quantity_kg), 2))
+    )
 
 
 def reverse_unidentified_stock(conn, category_id: int, location: str,
                                 bags: float, quantity_kg: float) -> None:
     """Subtract bags/kg from the unidentified_stock row for this category+location."""
-    conn.execute("""
-        UPDATE unidentified_stock
-           SET bags        = bags        - %s,
-               quantity_kg = quantity_kg - %s
-         WHERE category_id = %s AND location = %s
-    """, (round(float(bags), 2),
-          round(float(quantity_kg), 2),
-          category_id, location))
+    ph = _db_ph(conn)
+    conn.execute(
+        f"UPDATE unidentified_stock"
+        f"   SET bags        = bags        - {ph},"
+        f"       quantity_kg = quantity_kg - {ph}"
+        f" WHERE category_id = {ph} AND location = {ph}",
+        (round(float(bags), 2),
+         round(float(quantity_kg), 2),
+         category_id, location)
+    )
 
 
 def _now_ts() -> str:
@@ -914,21 +918,23 @@ def log_stock_change(conn, category_name: str, good_name: str,
                      source: str = "") -> None:
     """Append one row to stock_history capturing before/after levels and computed deltas."""
     from datetime import datetime
-    conn.execute("""
-        INSERT INTO stock_history
-            (recorded_at, category_name, good_name, location,
-             change_type, bags_before, bags_after, bags_change,
-             kg_before, kg_after, kg_change, source)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, (
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        category_name, good_name, location, change_type,
-        round(float(bags_before), 2), round(float(bags_after), 2),
-        round(float(bags_after - bags_before), 2),
-        round(float(kg_before), 2), round(float(kg_after), 2),
-        round(float(kg_after - kg_before), 2),
-        source
-    ))
+    ph = _db_ph(conn)
+    conn.execute(
+        f"INSERT INTO stock_history"
+        f"    (recorded_at, category_name, good_name, location,"
+        f"     change_type, bags_before, bags_after, bags_change,"
+        f"     kg_before, kg_after, kg_change, source)"
+        f" VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})",
+        (
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            category_name, good_name, location, change_type,
+            round(float(bags_before), 2), round(float(bags_after), 2),
+            round(float(bags_after - bags_before), 2),
+            round(float(kg_before), 2), round(float(kg_after), 2),
+            round(float(kg_after - kg_before), 2),
+            source
+        )
+    )
 
 
 def purge_old_stock_history(conn) -> None:

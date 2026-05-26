@@ -1924,7 +1924,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                     "WHERE source_type=%s AND source_id=%s",
                                                     (SRC_CUST_CHQ_TXN, tid))
                                             # ── CASH IN HAND SYNC — Settlement path ──────────────────
-                                            if sett_method == "Cash" and float(P_disp or 0) > 0:
+                                            if sett_method == "Cash" and float(_p_to_save or 0) > 0:
                                                 _existing_cih = conn.execute("""
                                                     SELECT COALESCE(SUM(c.amount), 0) AS v
                                                     FROM cash_in_hand_entries c
@@ -1934,7 +1934,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                     WHERE p.transaction_id = %s
                                                 """, (SRC_CUSTOMER_CASH, tid)).fetchone()["v"]
                                                 _existing_cih = round(float(_existing_cih or 0), 2)
-                                                _sett_amount  = round(float(P_disp), 2)
+                                                _sett_amount  = round(float(_p_to_save), 2)
                                                 _gap          = round(_sett_amount - _existing_cih, 2)
                                                 if _gap > 0.01:
                                                     conn.execute("""
