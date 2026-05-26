@@ -38,6 +38,13 @@ FIRM_SP = "SP Spices"
 FIRM_MT = "Mukund Traders"
 FIRMS   = (FIRM_SP, FIRM_MT)
 
+# ── Bank accounts per firm ──────────────────────────────────────
+BANK_ACCOUNTS = {
+    FIRM_SP: ("BOB", "CBI", "Kotak"),
+    FIRM_MT: ("BOB", "CBI"),
+}
+DEFAULT_BANK_ACCOUNT = "BOB"
+
 # ── Passbook source types ───────────────────────────────────────
 SRC_MANUAL       = "Manual"
 SRC_VENDOR_RTGS  = "VendorRTGS"
@@ -377,7 +384,8 @@ def _sqlite_ddl(conn):
             cheque_number TEXT DEFAULT '',
             cheque_date   TEXT DEFAULT '',
             source_type   TEXT NOT NULL DEFAULT 'Manual',
-            source_id     INTEGER
+            source_id     INTEGER,
+            bank_account  TEXT NOT NULL DEFAULT 'Unknown'
         )""",
         """CREATE TABLE IF NOT EXISTS passbook_opening_balance (
             firm           TEXT PRIMARY KEY,
@@ -487,8 +495,8 @@ def _sqlite_ddl(conn):
         conn.execute(stmt)
     # Partial unique indexes (enforce idempotency for opening balance rows)
     conn.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_passbook_opening_per_firm
-        ON passbook_entries (firm) WHERE source_type = 'Opening'
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_passbook_opening_per_firm_account
+        ON passbook_entries (firm, bank_account) WHERE source_type = 'Opening'
     """)
     conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS uq_cih_opening
@@ -518,6 +526,26 @@ def _sqlite_ddl(conn):
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_login_attempts_ip_time
         ON login_attempts (ip_address, attempted_at)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_passbook_firm_account
+        ON passbook_entries (firm, bank_account)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_passbook_firm_account_date
+        ON passbook_entries (firm, bank_account, entry_date)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_customer_txns_status
+        ON customer_transactions (payment_status)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_customer_txns_broker
+        ON customer_transactions (broker_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_vendor_entries_vendor
+        ON vendor_entries (vendor_id)
     """)
     conn.commit()
 
@@ -591,9 +619,14 @@ def ensure_schema(conn=None):
                     END IF;
                 END $$
             """)
+            conn.execute(
+                "ALTER TABLE passbook_entries ADD COLUMN IF NOT EXISTS "
+                "bank_account TEXT NOT NULL DEFAULT 'Unknown'"
+            )
+            conn.execute("DROP INDEX IF EXISTS uq_passbook_opening_per_firm")
             conn.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS uq_passbook_opening_per_firm
-                ON passbook_entries (firm) WHERE source_type = 'Opening'
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_passbook_opening_per_firm_account
+                ON passbook_entries (firm, bank_account) WHERE source_type = 'Opening'
             """)
             conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_cih_opening
@@ -640,6 +673,41 @@ def ensure_schema(conn=None):
                 "UPDATE passbook_entries SET cheque_status=NULL "
                 "WHERE source_type='VendorRTGS' AND cheque_status IS NOT NULL"
             )
+            # Migrate legacy 'Unknown' bank_account rows to BOB (one-time, guarded).
+            conn.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM passbook_entries
+                        WHERE bank_account = 'Unknown' OR bank_account IS NULL
+                    ) THEN
+                        UPDATE passbook_entries
+                        SET bank_account = 'BOB'
+                        WHERE bank_account = 'Unknown' OR bank_account IS NULL;
+                    END IF;
+                END $$
+            """)
+            # ── Performance indexes ──────────────────────────────
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_passbook_firm_account
+                ON passbook_entries (firm, bank_account)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_passbook_firm_account_date
+                ON passbook_entries (firm, bank_account, entry_date)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_customer_txns_status
+                ON customer_transactions (payment_status)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_customer_txns_broker
+                ON customer_transactions (broker_id)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_vendor_entries_vendor
+                ON vendor_entries (vendor_id)
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS login_attempts (
                     attempt_id   SERIAL PRIMARY KEY,
@@ -710,16 +778,18 @@ def ensure_schema(conn=None):
                 f"FROM passbook_opening_balance WHERE firm={ph}",
                 (_firm,)).fetchone()
             _exists = conn.execute(
-                f"SELECT 1 FROM passbook_entries WHERE firm={ph} AND source_type={ph}",
-                (_firm, SRC_OPENING)).fetchone()
+                f"SELECT 1 FROM passbook_entries "
+                f"WHERE firm={ph} AND source_type={ph} AND bank_account={ph}",
+                (_firm, SRC_OPENING, DEFAULT_BANK_ACCOUNT)).fetchone()
             if _ob and not _exists:
                 _oa    = float(_ob["opening_amount"])
                 _otype = 'Credit' if _oa >= 0 else 'Debit'
                 conn.execute(
                     f"INSERT INTO passbook_entries "
-                    f"(firm, entry_date, details, amount, txn_type, source_type) "
-                    f"VALUES ({ph}, {ph}, 'Opening Balance', {ph}, {ph}, {ph})",
-                    (_firm, _ob["opening_date"], abs(_oa), _otype, SRC_OPENING))
+                    f"(firm, entry_date, details, amount, txn_type, source_type, bank_account) "
+                    f"VALUES ({ph}, {ph}, 'Opening Balance', {ph}, {ph}, {ph}, {ph})",
+                    (_firm, _ob["opening_date"], abs(_oa), _otype, SRC_OPENING,
+                     DEFAULT_BANK_ACCOUNT))
 
         # ── Cash in Hand opening ───────────────────────────────
         conn.execute(

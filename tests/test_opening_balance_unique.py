@@ -22,12 +22,12 @@ def test_passbook_second_opening_entry_same_firm_blocked(db):
     ).fetchone()["n"]
     assert existing == 1, "ensure_schema must have seeded one opening row"
 
-    # A second insert for the same firm must fail
+    # A second insert for the same firm AND same bank_account must fail
     with pytest.raises(sqlite3.IntegrityError):
         db.execute("""
             INSERT INTO passbook_entries
-                (firm, entry_date, details, amount, txn_type, source_type)
-            VALUES ('SP Spices', '2024-02-01', 'Opening Balance', 15000, 'Credit', 'Opening')
+                (firm, entry_date, details, amount, txn_type, source_type, bank_account)
+            VALUES ('SP Spices', '2024-02-01', 'Opening Balance', 15000, 'Credit', 'Opening', 'BOB')
         """)
 
 

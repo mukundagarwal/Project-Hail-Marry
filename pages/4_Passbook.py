@@ -1,6 +1,7 @@
 """
 Passbook — bank account ledgers for SP Spices and Mukund Traders.
-Navigation: st.session_state.pb_page in ("home", "firm", "cash")
+Navigation: st.session_state.pb_view in ("home", "firm", "cih") +
+            pb_firm (selected firm) + pb_account (selected bank account)
 """
 
 import math
@@ -13,6 +14,7 @@ from utils.db import (
     pg_read_sql,
     get_conn, _ensure_schema_once,
     FIRM_SP, FIRM_MT, FIRMS,
+    BANK_ACCOUNTS, DEFAULT_BANK_ACCOUNT,
     SRC_MANUAL, SRC_VENDOR_RTGS,
     SRC_CUST_CHQ_TXN, SRC_CUST_CHQ_PMT,
     SRC_ALLOCATION, SRC_OPENING,
@@ -25,6 +27,9 @@ from utils.formatters import fmt_inr, fmt_date, h, days_between
 from utils.passbook_helpers import (
     compute_passbook_view, compute_cash_view,
     _firm_summary, _cih_summary,
+    cached_passbook_view, cached_firm_summary,
+    cached_cash_view, cached_cih_summary,
+    clear_passbook_cache,
     allocate_to_customer, _unlink_allocation,
 )
 from utils.auth import require_login, render_logout_button
@@ -47,8 +52,9 @@ st.markdown(BRAND_BAR_HTML, unsafe_allow_html=True)
 
 # ── Session state ──────────────────────────────────────────────
 for _k, _v in {
-    "pb_page":             "home",
-    "pb_selected_firm":    FIRM_SP,
+    "pb_view":             "home",
+    "pb_firm":             FIRM_SP,
+    "pb_account":          DEFAULT_BANK_ACCOUNT,
     "pb_filter_mode":      "All",
     "pb_filter_single":    date.today(),
     "pb_filter_start":     date.today(),
@@ -133,7 +139,7 @@ def _get_all_customers(conn) -> list:
 #  PAGE: HOME  (Level 1)
 # ══════════════════════════════════════════════════════════════
 
-if st.session_state.pb_page == "home":
+if st.session_state.pb_view == "home":
 
     bcol, _ = st.columns([1, 8])
     with bcol:
@@ -146,13 +152,9 @@ if st.session_state.pb_page == "home":
     st.markdown('<div class="page-sub">Bank account ledgers for both firms</div>',
                 unsafe_allow_html=True)
 
-    _home_conn = get_conn()
-    try:
-        stats_sp  = _firm_summary(FIRM_SP, conn=_home_conn)
-        stats_mt  = _firm_summary(FIRM_MT, conn=_home_conn)
-        stats_cih = _cih_summary(conn=_home_conn)
-    finally:
-        _home_conn.close()
+    stats_sp  = cached_firm_summary(FIRM_SP)
+    stats_mt  = cached_firm_summary(FIRM_MT)
+    stats_cih = cached_cih_summary()
 
     fc1, fc2 = st.columns(2, gap="medium")
     for col_w, firm_name, stats in [
@@ -176,8 +178,9 @@ if st.session_state.pb_page == "home":
             if st.button("Open Passbook →",
                          key=f"pb_open_{firm_name.replace(' ','_')}",
                          use_container_width=True):
-                st.session_state["pb_selected_firm"] = firm_name
-                st.session_state["pb_page"]          = "firm"
+                st.session_state["pb_firm"]          = firm_name
+                st.session_state["pb_account"]       = DEFAULT_BANK_ACCOUNT
+                st.session_state["pb_view"]          = "firm"
                 st.session_state["pb_show_add_form"] = False
                 st.session_state["pb_show_ob_form"]  = False
                 st.rerun()
@@ -197,7 +200,7 @@ if st.session_state.pb_page == "home":
         f'<span>Last: {cih_last_str}</span>'
         f'</div></div>', unsafe_allow_html=True)
     if st.button("Open Cash Register →", key="pb_open_cash", use_container_width=False):
-        st.session_state["pb_page"]             = "cash"
+        st.session_state["pb_view"]              = "cash"
         st.session_state["pb_show_cih_add_form"] = False
         st.session_state["pb_show_cih_ob_form"]  = False
         st.rerun()
@@ -221,9 +224,10 @@ if st.session_state.pb_page == "home":
 #  PAGE: FIRM PASSBOOK  (Level 2)
 # ══════════════════════════════════════════════════════════════
 
-elif st.session_state.pb_page == "firm":
+elif st.session_state.pb_view == "firm":
 
-    firm = st.session_state.pb_selected_firm
+    firm    = st.session_state.pb_firm
+    account = st.session_state.pb_account
 
     bcol, _ = st.columns([1, 8])
     with bcol:
@@ -232,18 +236,37 @@ elif st.session_state.pb_page == "firm":
             for _key in list(st.session_state.keys()):
                 if _key.startswith(("pb_edit_", "pb_del_")):
                     del st.session_state[_key]
-            st.session_state.pb_page          = "home"
+            st.session_state.pb_view          = "home"
             st.session_state.pb_firm_page     = 0
             st.session_state.pb_show_add_form = False
             st.session_state.pb_show_ob_form  = False
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
+    # ── Account pills ──────────────────────────────────────────
+    _accts     = list(BANK_ACCOUNTS.get(firm, (DEFAULT_BANK_ACCOUNT,)))
+    _pill_cols = st.columns(len(_accts))
+    for _pi, _ac in enumerate(_accts):
+        with _pill_cols[_pi]:
+            _is_active = (_ac == account)
+            if st.button(
+                _ac, key=f"pb_pill_{_ac}",
+                use_container_width=True,
+                help=f"View {_ac} account",
+                type="primary" if _is_active else "secondary",
+            ):
+                st.session_state["pb_account"]       = _ac
+                st.session_state["pb_firm_page"]     = 0
+                st.session_state["pb_show_add_form"] = False
+                st.session_state["pb_show_ob_form"]  = False
+                account = _ac
+                st.rerun()
+
+    # ── Stats (from cached read) ───────────────────────────────
+    df_all   = cached_passbook_view(firm, account)
+    non_pend = df_all[~df_all["balance_is_pending"]] if not df_all.empty else pd.DataFrame()
     conn = get_conn()
     try:
-        # ── Stats ──────────────────────────────────────────────
-        df_all   = compute_passbook_view(firm, conn=conn)
-        non_pend = df_all[~df_all["balance_is_pending"]] if not df_all.empty else pd.DataFrame()
         balance  = float(non_pend.iloc[0]["balance"]) if not non_pend.empty else 0.0
         pend_sum = float(df_all.loc[df_all["balance_is_pending"], "amount"].sum()) if not df_all.empty else 0.0
         tot_cr   = float(df_all.loc[df_all["txn_type"] == "Credit", "amount"].sum()) if not df_all.empty else 0.0
@@ -370,12 +393,12 @@ elif st.session_state.pb_page == "firm":
                             _cur = conn.execute(
                                 "INSERT INTO passbook_entries "
                                 "(firm,entry_date,details,amount,txn_type,"
-                                " cheque_number,cheque_status,source_type) "
-                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+                                " cheque_number,cheque_status,source_type,bank_account) "
+                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                                 "RETURNING entry_id",
                                 (firm, str(a_date), _det,
                                  round(a_amount, 2), a_type,
-                                 _chq_no, _chq_st, SRC_MANUAL))
+                                 _chq_no, _chq_st, SRC_MANUAL, account))
                             new_eid = _cur.fetchone()["entry_id"]
 
                             # If user chose a specific customer (not Suspense / new name),
@@ -399,6 +422,7 @@ elif st.session_state.pb_page == "firm":
                                 st.info(f"Credit saved as '{_det}'. {_alloc_result['message']}")
                         else:
                             st.success("Transaction saved.")
+                        clear_passbook_cache()
                         st.rerun()
             with af_s2:
                 if st.button("✕ Cancel", key="pb_af_cancel", use_container_width=True):
@@ -413,16 +437,20 @@ elif st.session_state.pb_page == "firm":
             ob_row = conn.execute(
                 "SELECT opening_amount, opening_date, notes "
                 "FROM passbook_opening_balance WHERE firm=%s", (firm,)).fetchone()
-            _prev_amt  = float(ob_row["opening_amount"]) if ob_row else 0.0
-            _prev_date = (date.fromisoformat(str(ob_row["opening_date"]))
-                          if ob_row else date.today())
+            _pb_ob_row = conn.execute(
+                "SELECT amount, entry_date FROM passbook_entries "
+                "WHERE firm=%s AND source_type=%s AND bank_account=%s",
+                (firm, SRC_OPENING, account)).fetchone()
+            _prev_amt  = float(_pb_ob_row["amount"]) if _pb_ob_row else 0.0
+            _prev_date = (date.fromisoformat(str(_pb_ob_row["entry_date"]))
+                          if _pb_ob_row else date.today())
             _prev_note = (ob_row["notes"] or "") if ob_row else ""
 
             st.markdown(
                 '<div style="background:#181610;border:1px solid #2a2820;'
                 'border-radius:10px;padding:1rem 1.2rem;margin-bottom:0.8rem">',
                 unsafe_allow_html=True)
-            st.markdown("**⚙ Set Opening Balance**")
+            st.markdown(f"**⚙ Set Opening Balance — {account}**")
             with st.form("pb_ob_form"):
                 ob1, ob2 = st.columns(2)
                 with ob1:
@@ -449,16 +477,18 @@ elif st.session_state.pb_page == "firm":
                                 (firm, _oa, str(ob_date), (ob_note or "").strip()))
                             conn.execute("""
                                 INSERT INTO passbook_entries
-                                    (firm, entry_date, details, amount, txn_type, source_type)
-                                VALUES (%s, %s, 'Opening Balance', %s, %s, %s)
-                                ON CONFLICT (firm) WHERE source_type = 'Opening'
+                                    (firm, entry_date, details, amount, txn_type,
+                                     source_type, bank_account)
+                                VALUES (%s, %s, 'Opening Balance', %s, %s, %s, %s)
+                                ON CONFLICT (firm, bank_account) WHERE source_type = 'Opening'
                                 DO UPDATE SET
                                     amount     = EXCLUDED.amount,
                                     txn_type   = EXCLUDED.txn_type,
                                     entry_date = EXCLUDED.entry_date
-                            """, (firm, str(ob_date), abs(_oa), _otype, SRC_OPENING))
+                            """, (firm, str(ob_date), abs(_oa), _otype, SRC_OPENING, account))
                         st.session_state.pb_show_ob_form = False
                         st.toast("Opening balance updated.", icon="✅")
+                        clear_passbook_cache()
                         st.rerun()
                 with obs2:
                     if st.form_submit_button("✕ Cancel", use_container_width=True):
@@ -469,7 +499,7 @@ elif st.session_state.pb_page == "firm":
         st.markdown("<hr>", unsafe_allow_html=True)
 
         # ── Build and filter view ──────────────────────────────
-        df_view = compute_passbook_view(firm, conn=conn)
+        df_view = df_all.copy()
 
         if pb_search:
             df_view = df_view[
@@ -484,7 +514,7 @@ elif st.session_state.pb_page == "firm":
                               (df_view["entry_date"] <= _re)]
 
         # ── Pagination (Fix 4) ────────────────────────────────
-        _pb_sig = (firm, pb_search, pb_fmode,
+        _pb_sig = (firm, account, pb_search, pb_fmode,
                    str(st.session_state.pb_filter_single),
                    str(st.session_state.pb_filter_start),
                    str(st.session_state.pb_filter_end))
@@ -605,7 +635,9 @@ elif st.session_state.pb_page == "firm":
                             conn.execute(
                                 "UPDATE passbook_entries SET cheque_status=%s "
                                 "WHERE entry_id=%s", (CHQ_CLEARED, eid))
-                            conn.commit(); st.rerun()
+                            conn.commit()
+                            clear_passbook_cache()
+                            st.rerun()
                     elif _chq_eligible and chq_st == CHQ_CLEARED:
                         if st.button("✓ Cleared", key=f"pb_st_{eid}",
                                      use_container_width=True,
@@ -613,7 +645,9 @@ elif st.session_state.pb_page == "firm":
                             conn.execute(
                                 "UPDATE passbook_entries SET cheque_status=%s "
                                 "WHERE entry_id=%s", (CHQ_PENDING, eid))
-                            conn.commit(); st.rerun()
+                            conn.commit()
+                            clear_passbook_cache()
+                            st.rerun()
                     else:
                         st.markdown(f'<div style="{_CELL};color:#3a3628">—</div>',
                                     unsafe_allow_html=True)
@@ -746,6 +780,7 @@ elif st.session_state.pb_page == "firm":
                                             st.success(f"Allocated to '{_c['customer_name']}'.")
                                         else:
                                             st.warning(_res["message"])
+                                        clear_passbook_cache()
                                         st.rerun()
 
                         st.markdown('</div>', unsafe_allow_html=True)
@@ -758,6 +793,7 @@ elif st.session_state.pb_page == "firm":
                             # Caller handles commit via `with conn:` above
                             _ul_res = _unlink_allocation(conn, eid)
                         st.success("Entry unlinked — payment reversed.")
+                        clear_passbook_cache()
                         st.rerun()
 
                 # ── Inline Edit form ──────────────────────────
@@ -834,6 +870,7 @@ elif st.session_state.pb_page == "firm":
                                             (_ns, _np, _a_tid))
                                 st.session_state[f"pb_edit_{eid}"] = False
                                 st.success("Entry and linked payment updated.")
+                                clear_passbook_cache()
                                 st.rerun()
                         with efs2:
                             if st.button("✕ Cancel", key=f"pb_efcx_{eid}",
@@ -892,6 +929,7 @@ elif st.session_state.pb_page == "firm":
                                     conn.commit()
                                     st.session_state[f"pb_edit_{eid}"] = False
                                     st.success("Entry updated.")
+                                    clear_passbook_cache()
                                     st.rerun()
                         with efs2:
                             if st.button("✕ Cancel", key=f"pb_efcx_{eid}",
@@ -944,6 +982,7 @@ elif st.session_state.pb_page == "firm":
                                     "DELETE FROM passbook_entries WHERE entry_id=%s",
                                     (eid,))
                             st.session_state.pop(f"pb_del_{eid}", None)
+                            clear_passbook_cache()
                             st.rerun()
                     with dd2:
                         if st.button("✕ Cancel", key=f"pb_cfc_{eid}",
@@ -959,7 +998,7 @@ elif st.session_state.pb_page == "firm":
 #  PAGE: CASH IN HAND  (Level 2)
 # ══════════════════════════════════════════════════════════════
 
-elif st.session_state.pb_page == "cash":
+elif st.session_state.pb_view == "cash":
 
     bcol, _ = st.columns([1, 8])
     with bcol:
@@ -968,7 +1007,7 @@ elif st.session_state.pb_page == "cash":
             for _key in list(st.session_state.keys()):
                 if _key.startswith(("cih_edit_", "cih_del_")):
                     del st.session_state[_key]
-            st.session_state.pb_page              = "home"
+            st.session_state.pb_view              = "home"
             st.session_state.pb_cih_page          = 0
             st.session_state.pb_show_cih_add_form = False
             st.session_state.pb_show_cih_ob_form  = False
@@ -982,7 +1021,7 @@ elif st.session_state.pb_page == "cash":
     conn = get_conn()
     try:
         # Single compute_cash_view call reused for both stat pills and filtered table
-        df_cih_full = compute_cash_view(conn=conn)
+        df_cih_full = cached_cash_view()
 
         # ── Stat row ───────────────────────────────────────────
         cih_bal = float(df_cih_full.iloc[0]["balance"]) if not df_cih_full.empty else 0.0
@@ -1090,6 +1129,7 @@ elif st.session_state.pb_page == "cash":
                              ca_type, SRC_MANUAL))
                     st.session_state.pb_show_cih_add_form = False
                     st.toast("Transaction saved.", icon="✅")
+                    clear_passbook_cache()
                     st.rerun()
             if _cih_cancel:
                 st.session_state.pb_show_cih_add_form = False
@@ -1155,6 +1195,7 @@ elif st.session_state.pb_page == "cash":
                           abs(_coa), _cotype, SRC_CIH_OPENING))
                 st.session_state.pb_show_cih_ob_form = False
                 st.toast("Opening balance updated.", icon="✅")
+                clear_passbook_cache()
                 st.rerun()
             if _cob_cancel:
                 st.session_state.pb_show_cih_ob_form = False
@@ -1343,6 +1384,7 @@ elif st.session_state.pb_page == "cash":
                                          round(cne_amt, 2), cne_type, ceid))
                                 st.session_state[f"cih_edit_{ceid}"] = False
                                 st.success("Entry updated.")
+                                clear_passbook_cache()
                                 st.rerun()
                     with cefs2:
                         if st.button("✕ Cancel", key=f"cih_efcx_{ceid}",
@@ -1368,6 +1410,7 @@ elif st.session_state.pb_page == "cash":
                                     "DELETE FROM cash_in_hand_entries WHERE entry_id=%s",
                                     (ceid,))
                             st.session_state.pop(f"cih_del_{ceid}", None)
+                            clear_passbook_cache()
                             st.rerun()
                     with cdd2:
                         if st.button("✕ Cancel", key=f"cih_cfc_{ceid}",

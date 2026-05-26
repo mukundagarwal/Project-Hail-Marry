@@ -10,24 +10,33 @@ from utils.db import (
     get_conn, _db_ph,
     SRC_ALLOCATION, SRC_MANUAL, SRC_OPENING, SRC_CIH_OPENING,
     CHQ_PENDING, CHQ_CLEARED,
+    DEFAULT_BANK_ACCOUNT,
 )
 from utils.formatters import days_between
+
+# ── Streamlit cache decorator (no-op when running outside Streamlit) ──────────
+try:
+    import streamlit as _st
+    _cache_ttl_30 = _st.cache_data(ttl=30, show_spinner=False)
+except Exception:
+    _cache_ttl_30 = lambda f: f
 
 
 # ══════════════════════════════════════════════════════════════════
 #  BALANCE / VIEW HELPERS
 # ══════════════════════════════════════════════════════════════════
 
-def compute_passbook_view(firm: str, conn=None) -> pd.DataFrame:
+def compute_passbook_view(firm: str, bank_account: str = DEFAULT_BANK_ACCOUNT,
+                          conn=None) -> pd.DataFrame:
     """
     Returns DataFrame newest-first with columns:
       s_no, entry_id, entry_date, details, amount, txn_type,
       cheque_number, cheque_status, source_type, source_id,
       signed_amount, balance, balance_is_pending
 
-    Pending cheques are excluded from the running balance; their
-    displayed balance is the hypothetical 'if-cleared' value, computed
-    via a SQL window function (SUM OVER) for efficiency.
+    Filters by both firm AND bank_account. Pending cheques are excluded
+    from the running balance; their displayed balance is the hypothetical
+    'if-cleared' value, computed via a SQL window function (SUM OVER).
     When conn is provided it is used and NOT closed; when omitted
     the function opens and closes its own connection.
     """
@@ -48,9 +57,9 @@ def compute_passbook_view(firm: str, conn=None) -> pd.DataFrame:
                 ) OVER (ORDER BY entry_date ASC, entry_id ASC
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
                     AS _running_cleared
-            FROM passbook_entries WHERE firm = {ph}
+            FROM passbook_entries WHERE firm = {ph} AND bank_account = {ph}
             ORDER BY entry_date ASC, entry_id ASC
-        """, (firm,)).fetchall()
+        """, (firm, bank_account)).fetchall()
     finally:
         if _own_conn:
             conn.close()
@@ -120,23 +129,44 @@ def compute_cash_view(conn=None) -> pd.DataFrame:
 
 
 def _firm_summary(firm: str, conn=None) -> dict:
-    df = compute_passbook_view(firm, conn=conn)
-    if df.empty:
+    """Aggregate stats across ALL bank accounts for the home-page card."""
+    _own_conn = conn is None
+    if _own_conn:
+        conn = get_conn()
+    ph = _db_ph(conn)
+    try:
+        rows = conn.execute(f"""
+            SELECT txn_type, cheque_status, amount, entry_date
+            FROM passbook_entries WHERE firm = {ph}
+            ORDER BY entry_date ASC, entry_id ASC
+        """, (firm,)).fetchall()
+    finally:
+        if _own_conn:
+            conn.close()
+
+    if not rows:
         return {"balance": 0.0, "pending_sum": 0.0,
                 "total_credits": 0.0, "total_debits": 0.0,
                 "entry_count": 0, "last_date": None}
-    non_pend      = df[~df["balance_is_pending"]]
-    balance       = float(non_pend.iloc[0]["balance"]) if not non_pend.empty else 0.0
-    pending_sum   = float(df.loc[df["balance_is_pending"], "amount"].sum())
+
+    df = pd.DataFrame([dict(r) for r in rows])
+    df["signed"] = df.apply(
+        lambda r: float(r["amount"]) if r["txn_type"] == "Credit" else -float(r["amount"]),
+        axis=1)
+    df["is_pending"] = df["cheque_status"] == "Pending"
+
+    cleared_sum   = float(df.loc[~df["is_pending"], "signed"].sum())
+    pending_sum   = float(df.loc[df["is_pending"],  "amount"].sum())
     total_credits = float(df.loc[df["txn_type"] == "Credit", "amount"].sum())
     total_debits  = float(df.loc[df["txn_type"] == "Debit",  "amount"].sum())
+    last_date     = df["entry_date"].iloc[-1]
     return {
-        "balance":       round(balance, 2),
+        "balance":       round(cleared_sum, 2),
         "pending_sum":   round(pending_sum, 2),
         "total_credits": round(total_credits, 2),
         "total_debits":  round(total_debits, 2),
         "entry_count":   len(df),
-        "last_date":     df.iloc[0]["entry_date"],
+        "last_date":     last_date,
     }
 
 
@@ -155,6 +185,44 @@ def _cih_summary(conn=None) -> dict:
         "entry_count":   len(df),
         "last_date":     df.iloc[0]["entry_date"],
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CACHED WRAPPERS  (no conn arg — open their own connection; cache-friendly)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@_cache_ttl_30
+def cached_passbook_view(firm: str, bank_account: str) -> pd.DataFrame:
+    """30-second cached wrapper around compute_passbook_view (no conn)."""
+    return compute_passbook_view(firm, bank_account)
+
+
+@_cache_ttl_30
+def cached_firm_summary(firm: str) -> dict:
+    """30-second cached firm summary (all bank accounts)."""
+    return _firm_summary(firm)
+
+
+@_cache_ttl_30
+def cached_cash_view() -> pd.DataFrame:
+    """30-second cached wrapper around compute_cash_view."""
+    return compute_cash_view()
+
+
+@_cache_ttl_30
+def cached_cih_summary() -> dict:
+    """30-second cached CIH summary."""
+    return _cih_summary()
+
+
+def clear_passbook_cache():
+    """Invalidate all passbook / CIH read caches. Call after any write to these tables."""
+    for _fn in (cached_passbook_view, cached_firm_summary,
+                cached_cash_view, cached_cih_summary):
+        try:
+            _fn.clear()
+        except Exception:
+            continue
 
 
 # ══════════════════════════════════════════════════════════════════

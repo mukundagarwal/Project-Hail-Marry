@@ -2,7 +2,7 @@
 import pytest
 import pandas as pd
 from utils.passbook_helpers import compute_passbook_view, compute_cash_view
-from utils.db import SRC_OPENING, SRC_CIH_OPENING, CHQ_PENDING, CHQ_CLEARED
+from utils.db import SRC_OPENING, SRC_CIH_OPENING, CHQ_PENDING, CHQ_CLEARED, DEFAULT_BANK_ACCOUNT
 
 
 # ── Per-step rounding ─────────────────────────────────────────
@@ -33,17 +33,17 @@ def test_pending_cheque_excluded_from_balance(db):
     db.execute("DELETE FROM passbook_entries WHERE firm='SP Spices'")
     db.execute("""
         INSERT INTO passbook_entries
-          (firm, entry_date, details, amount, txn_type, source_type)
-        VALUES ('SP Spices', '2026-01-01', 'Payment', 10000, 'Credit', 'Manual')
+          (firm, entry_date, details, amount, txn_type, source_type, bank_account)
+        VALUES ('SP Spices', '2026-01-01', 'Payment', 10000, 'Credit', 'Manual', 'BOB')
     """)
     db.execute("""
         INSERT INTO passbook_entries
-          (firm, entry_date, details, amount, txn_type, cheque_status, source_type)
-        VALUES ('SP Spices', '2026-01-02', 'Cheque', 5000, 'Credit', 'Pending', 'Manual')
+          (firm, entry_date, details, amount, txn_type, cheque_status, source_type, bank_account)
+        VALUES ('SP Spices', '2026-01-02', 'Cheque', 5000, 'Credit', 'Pending', 'Manual', 'BOB')
     """)
     db.commit()
 
-    df = compute_passbook_view("SP Spices", conn=db)
+    df = compute_passbook_view("SP Spices", DEFAULT_BANK_ACCOUNT, conn=db)
     assert not df.empty
 
     non_pend = df[~df["balance_is_pending"]]
@@ -62,13 +62,13 @@ def test_clearing_cheque_updates_balance(db):
     db.execute("DELETE FROM passbook_entries WHERE firm='SP Spices'")
     db.execute("""
         INSERT INTO passbook_entries
-          (firm, entry_date, details, amount, txn_type, source_type)
-        VALUES ('SP Spices', '2026-01-01', 'Payment', 10000, 'Credit', 'Manual')
+          (firm, entry_date, details, amount, txn_type, source_type, bank_account)
+        VALUES ('SP Spices', '2026-01-01', 'Payment', 10000, 'Credit', 'Manual', 'BOB')
     """)
     db.execute("""
         INSERT INTO passbook_entries
-          (firm, entry_date, details, amount, txn_type, cheque_status, source_type)
-        VALUES ('SP Spices', '2026-01-02', 'Cheque', 5000, 'Credit', 'Pending', 'Manual')
+          (firm, entry_date, details, amount, txn_type, cheque_status, source_type, bank_account)
+        VALUES ('SP Spices', '2026-01-02', 'Cheque', 5000, 'Credit', 'Pending', 'Manual', 'BOB')
     """)
     db.commit()
 
@@ -76,7 +76,7 @@ def test_clearing_cheque_updates_balance(db):
                (CHQ_CLEARED, CHQ_PENDING))
     db.commit()
 
-    df = compute_passbook_view("SP Spices", conn=db)
+    df = compute_passbook_view("SP Spices", DEFAULT_BANK_ACCOUNT, conn=db)
     assert float(df.iloc[0]["balance"]) == 15000.0
     assert df["balance_is_pending"].sum() == 0
 

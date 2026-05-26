@@ -19,6 +19,7 @@ from utils.db import (
     INTEREST_RATE_PCT, DEFAULT_GRACE_DAYS, TXNS_PER_PAGE,
     GOODS_OPTIONS, ARECA_NUT_GOODS, BLACK_PEPPER_GOODS,
     FIRM_SP, FIRM_MT, FIRMS,
+    BANK_ACCOUNTS, DEFAULT_BANK_ACCOUNT,
     SRC_MANUAL, SRC_VENDOR_RTGS,
     SRC_CUST_CHQ_TXN, SRC_CUST_CHQ_PMT,
     SRC_ALLOCATION, SRC_OPENING,
@@ -29,6 +30,7 @@ from utils.formatters import fmt_date, fmt_inr, parse_slash_amount, days_between
 from utils.calculator import calculate_final_settlement, line_total, _days_30_360
 from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.auth import require_login, render_logout_button
+from utils.passbook_helpers import clear_passbook_cache
 
 # ── Page config ────────────────────────────────────────────────
 st.set_page_config(
@@ -1266,8 +1268,12 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                         horizontal=True,
                                         index=0 if _ep_dep_default == FIRM_SP else 1,
                                         key=f"epdepf_{tid}_{pid_p}")
+                                    ep_dep_account = st.selectbox(
+                                        "Bank Account",
+                                        BANK_ACCOUNTS.get(ep_dep_firm, (DEFAULT_BANK_ACCOUNT,)),
+                                        index=0, key=f"epdepacct_{tid}_{pid_p}")
                                 else:
-                                    ep_chq_no, ep_chq_date, ep_dep_firm = None, None, None
+                                    ep_chq_no, ep_chq_date, ep_dep_firm, ep_dep_account = None, None, None, None
                                 with st.form(f"edit_pmt_form_{tid}_{pid_p}"):
                                     ef1, ef2 = st.columns(2)
                                     with ef1:
@@ -1333,14 +1339,15 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                                     "INSERT INTO passbook_entries "
                                                                     "(firm,entry_date,details,amount,txn_type,"
                                                                     " cheque_number,cheque_status,"
-                                                                    " source_type,source_id) "
-                                                                    "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s,%s)",
+                                                                    " source_type,source_id,bank_account) "
+                                                                    "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s,%s,%s)",
                                                                     (ep_dep_firm,
                                                                      ep_chq_dt_sv or str(ep_date),
                                                                      _det3, round(ep_amt, 2),
                                                                      ep_chq_no_sv,
                                                                      CHQ_PENDING,
-                                                                     SRC_CUST_CHQ_PMT, pid_p))
+                                                                     SRC_CUST_CHQ_PMT, pid_p,
+                                                                     ep_dep_account or DEFAULT_BANK_ACCOUNT))
                                                         # ── Passbook sync: auto-allocated entry amount/date ──
                                                         if _is_auto_alloc and _auto_alloc_eid:
                                                             conn.execute(
@@ -1378,6 +1385,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                                  SRC_CUSTOMER_CASH, pid_p))
                                                     st.session_state[edit_pmt_key] = False
                                                     st.success(f"Payment #{pid_p} updated. Please recalculate.")
+                                                    clear_passbook_cache()
                                                     st.rerun()
                                             except (ValueError, InvalidOperation) as e:
                                                 st.error(f"Invalid amount: {e}")
@@ -1422,8 +1430,12 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                             p_dep_firm = st.radio(
                                 "Deposit to", ["SP Spices", "Mukund Traders"],
                                 horizontal=True, index=0, key=f"pdepf_{tid}")
+                            p_dep_account = st.selectbox(
+                                "Bank Account",
+                                BANK_ACCOUNTS.get(p_dep_firm, (DEFAULT_BANK_ACCOUNT,)),
+                                index=0, key=f"pdepacct_{tid}")
                         else:
-                            p_chq_no, p_chq_date, p_dep_firm = None, None, None
+                            p_chq_no, p_chq_date, p_dep_firm, p_dep_account = None, None, None, None
                         st.markdown(f"*Outstanding before this payment: {fmt_inr(A - total_paid_so_far)}*")
                         with st.form(f"pmt_form_{tid}"):
                             pf1, pf2 = st.columns(2)
@@ -1489,15 +1501,16 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                         "INSERT INTO passbook_entries "
                                                         "(firm,entry_date,details,amount,txn_type,"
                                                         " cheque_number,cheque_status,"
-                                                        " source_type,source_id) "
-                                                        "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s,%s)",
+                                                        " source_type,source_id,bank_account) "
+                                                        "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s,%s,%s)",
                                                         (p_dep_firm,
                                                          chq_date_save or str(p_date),
                                                          f"{txn['customer_name']} (via {_bn2})",
                                                          round(p_amt, 2),
                                                          chq_no_save,
                                                          CHQ_PENDING,
-                                                         SRC_CUST_CHQ_PMT, new_pmt_id))
+                                                         SRC_CUST_CHQ_PMT, new_pmt_id,
+                                                         p_dep_account or DEFAULT_BANK_ACCOUNT))
                                                 # ── CASH IN HAND SYNC ──────────────────────────────
                                                 if p_method == "Cash":
                                                     conn.execute(
@@ -1510,7 +1523,9 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                          round(p_amt, 2), 'Credit',
                                                          SRC_CUSTOMER_CASH, new_pmt_id))
                                             st.session_state[log_pmt_key] = False
-                                            st.success(f"Payment of {fmt_inr(p_amt)} saved!"); st.rerun()
+                                            st.success(f"Payment of {fmt_inr(p_amt)} saved!")
+                                            clear_passbook_cache()
+                                            st.rerun()
                                       except (ValueError, InvalidOperation) as e:
                                           st.error(f"Invalid amount: {e}")
                             with pf2:
@@ -1655,8 +1670,12 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                 "Deposit to", ["SP Spices", "Mukund Traders"],
                                 horizontal=True, index=0,
                                 key=f"sett_depf_{tid}")
+                            sett_dep_account = st.selectbox(
+                                "Bank Account",
+                                BANK_ACCOUNTS.get(sett_dep_firm, (DEFAULT_BANK_ACCOUNT,)),
+                                index=0, key=f"sett_depacct_{tid}")
                         else:
-                            sett_chq_no, sett_chq_date, sett_dep_firm = None, None, None
+                            sett_chq_no, sett_chq_date, sett_dep_firm, sett_dep_account = None, None, None, None
 
                         # Discount section outside form so "Custom Amount" shows dynamically
                         _prev_disc_amt = float(txn.get("discount_amount", 0) or 0)
@@ -1908,15 +1927,16 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                         "INSERT INTO passbook_entries "
                                                         "(firm,entry_date,details,amount,txn_type,"
                                                         " cheque_number,cheque_status,"
-                                                        " source_type,source_id) "
-                                                        "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s,%s)",
+                                                        " source_type,source_id,bank_account) "
+                                                        "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s,%s,%s)",
                                                         (sett_dep_firm,
                                                          _sv_chq_dt or str(date.today()),
                                                          _det4,
                                                          _pb_chq_amt,
                                                          _sv_chq_no,
                                                          CHQ_PENDING,
-                                                         SRC_CUST_CHQ_TXN, tid))
+                                                         SRC_CUST_CHQ_TXN, tid,
+                                                         sett_dep_account or DEFAULT_BANK_ACCOUNT))
                                             else:
                                                 # Non-cheque method, or overpayment (balance <= 0)
                                                 conn.execute(
@@ -1975,6 +1995,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                         if tid in st.session_state.get("sum_intercept", []):
                                             st.session_state.sum_intercept.remove(tid)
                                         st.success(f"✓ Settlement {fmt_inr(r['final_balance_due'])} saved.{_overpay_note}")
+                                        clear_passbook_cache()
                                         st.rerun()
                             with sc2:
                                 if st.button("Cancel", key=f"cancel_calc_{tid}", use_container_width=True):

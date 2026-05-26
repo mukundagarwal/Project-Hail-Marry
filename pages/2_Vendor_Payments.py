@@ -18,10 +18,12 @@ from utils.db import (
     log_stock_change, add_unidentified_stock, reverse_unidentified_stock,
     get_all_vendors_cached, invalidate_lookup_cache,
     ensure_good_at_all_locations, ensure_category_at_all_locations,
+    BANK_ACCOUNTS, DEFAULT_BANK_ACCOUNT,
     _ensure_schema_once)
 from utils.styles import APP_CSS, BRAND_BAR_HTML, get_light_mode_css
 from utils.formatters import fmt_inr, fmt_date, h, parse_slash_amount
 from utils.auth import require_login, render_logout_button
+from utils.passbook_helpers import clear_passbook_cache
 
 # ── Page config ─────────────────────────────────────────────────
 st.set_page_config(
@@ -328,6 +330,13 @@ def _payment_popover(vendor_id: int, ledger_type: str, firm, conn):
             p_date = st.date_input("Payment Date", value=date.today(), key=f"pfd_{_k}")
             p_amt  = st.number_input("Payment Amount (₹)", min_value=0.0, step=100.0,
                                      format="%.2f", key=f"pfa_{_k}")
+            if ledger_type == "RTGS":
+                p_bank_acct = st.selectbox(
+                    "Bank Account",
+                    BANK_ACCOUNTS.get(firm, (DEFAULT_BANK_ACCOUNT,)),
+                    index=0, key=f"pfba_{_k}")
+            else:
+                p_bank_acct = None
             note_s = st.text_input(
                 "Note (optional)",
                 placeholder="e.g. part payment, reference no., etc.",
@@ -356,9 +365,10 @@ def _payment_popover(vendor_id: int, ledger_type: str, firm, conn):
                             conn.execute(
                                 "INSERT INTO passbook_entries "
                                 "(firm,entry_date,details,amount,txn_type,"
-                                " source_type,source_id,cheque_status) "
-                                "VALUES (%s,%s,%s,%s,'Debit',%s,%s,NULL)",
-                                (firm, str(p_date), _vname, p_amt, SRC_VENDOR_RTGS, new_eid))
+                                " source_type,source_id,cheque_status,bank_account) "
+                                "VALUES (%s,%s,%s,%s,'Debit',%s,%s,NULL,%s)",
+                                (firm, str(p_date), _vname, p_amt, SRC_VENDOR_RTGS, new_eid,
+                                 p_bank_acct or DEFAULT_BANK_ACCOUNT))
                         # ── CASH IN HAND SYNC ──────────────────────────────
                         if ledger_type == "UB":
                             conn.execute(
@@ -367,6 +377,7 @@ def _payment_popover(vendor_id: int, ledger_type: str, firm, conn):
                                 "VALUES (%s,%s,%s,%s,%s,%s)",
                                 (str(p_date), _vname, p_amt, 'Debit', SRC_VENDOR_UB, new_eid))
                     st.toast(f"Payment of {fmt_inr(p_amt)} recorded.", icon="✅")
+                    clear_passbook_cache()
                     st.rerun()
 
 
