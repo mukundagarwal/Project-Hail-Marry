@@ -10,7 +10,7 @@ from utils.db import (
     get_conn, _db_ph,
     SRC_ALLOCATION, SRC_MANUAL, SRC_OPENING, SRC_CIH_OPENING,
     CHQ_PENDING, CHQ_CLEARED,
-    DEFAULT_BANK_ACCOUNT,
+    DEFAULT_BANK_ACCOUNT, BANK_ACCOUNTS,
 )
 from utils.formatters import days_between
 
@@ -54,12 +54,18 @@ def compute_passbook_view(firm: str, bank_account: str = DEFAULT_BANK_ACCOUNT,
                          THEN CASE WHEN txn_type = 'Credit' THEN amount ELSE -amount END
                          ELSE 0.0
                     END
-                ) OVER (ORDER BY entry_date ASC, entry_id ASC
+                ) OVER (ORDER BY
+                            CASE WHEN source_type = {ph} THEN 0 ELSE 1 END ASC,
+                            entry_date ASC,
+                            entry_id ASC
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
                     AS _running_cleared
             FROM passbook_entries WHERE firm = {ph} AND bank_account = {ph}
-            ORDER BY entry_date ASC, entry_id ASC
-        """, (firm, bank_account)).fetchall()
+            ORDER BY
+                CASE WHEN source_type = {ph} THEN 0 ELSE 1 END ASC,
+                entry_date ASC,
+                entry_id ASC
+        """, (SRC_OPENING, firm, bank_account, SRC_OPENING)).fetchall()
     finally:
         if _own_conn:
             conn.close()
@@ -170,6 +176,47 @@ def _firm_summary(firm: str, conn=None) -> dict:
     }
 
 
+def get_firm_total_balance(conn, firm: str) -> float:
+    """Sum of current cleared balances across all bank accounts for firm."""
+    ph = _db_ph(conn)
+    rows = conn.execute(f"""
+        SELECT bank_account,
+            SUM(
+                CASE WHEN source_type = {ph} THEN
+                    CASE WHEN txn_type = 'Credit' THEN amount ELSE -amount END
+                ELSE
+                    CASE WHEN cheque_status IS NULL OR cheque_status = {ph}
+                         THEN CASE WHEN txn_type = 'Credit' THEN amount ELSE -amount END
+                         ELSE 0.0 END
+                END
+            ) AS account_balance
+        FROM passbook_entries
+        WHERE firm = {ph}
+        GROUP BY bank_account
+    """, (SRC_OPENING, CHQ_CLEARED, firm)).fetchall()
+
+    if not rows:
+        return 0.0
+
+    firm_accounts = set(BANK_ACCOUNTS.get(firm, ()))
+    total = sum(
+        float(r["account_balance"] or 0)
+        for r in rows
+        if r["bank_account"] in firm_accounts
+    )
+    return round(total, 2)
+
+
+@_cache_ttl_30
+def cached_firm_total_balance(firm: str) -> float:
+    """30-second cached total balance across all accounts for firm."""
+    conn = get_conn()
+    try:
+        return get_firm_total_balance(conn, firm)
+    finally:
+        conn.close()
+
+
 def _cih_summary(conn=None) -> dict:
     df = compute_cash_view(conn=conn)
     if df.empty:
@@ -218,6 +265,7 @@ def cached_cih_summary() -> dict:
 def clear_passbook_cache():
     """Invalidate all passbook / CIH read caches. Call after any write to these tables."""
     for _fn in (cached_passbook_view, cached_firm_summary,
+                cached_firm_total_balance,
                 cached_cash_view, cached_cih_summary):
         try:
             _fn.clear()

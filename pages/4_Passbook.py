@@ -29,6 +29,7 @@ from utils.passbook_helpers import (
     compute_passbook_view, compute_cash_view,
     _firm_summary, _cih_summary,
     cached_passbook_view, cached_firm_summary,
+    cached_firm_total_balance,
     cached_cash_view, cached_cih_summary,
     clear_passbook_cache,
     allocate_to_customer, _unlink_allocation,
@@ -148,22 +149,27 @@ if st.session_state.pb_view == "home":
     stats_sp  = cached_firm_summary(FIRM_SP)
     stats_mt  = cached_firm_summary(FIRM_MT)
     stats_cih = cached_cih_summary()
+    total_sp  = cached_firm_total_balance(FIRM_SP)
+    total_mt  = cached_firm_total_balance(FIRM_MT)
 
     fc1, fc2 = st.columns(2, gap="medium")
-    for col_w, firm_name, stats in [
-        (fc1, FIRM_SP, stats_sp),
-        (fc2, FIRM_MT, stats_mt),
+    for col_w, firm_name, stats, firm_total in [
+        (fc1, FIRM_SP, stats_sp, total_sp),
+        (fc2, FIRM_MT, stats_mt, total_mt),
     ]:
         with col_w:
-            bc       = bal_color(stats["balance"])
+            bc       = bal_color(firm_total)
             last_str = fmt_date(stats["last_date"]) if stats["last_date"] else "—"
+            acct_str = " · ".join(BANK_ACCOUNTS.get(firm_name, ()))
             st.markdown(
                 f'<div style="background:#181610;border:1px solid #2a2820;border-radius:14px;'
                 f'padding:1.2rem 1.4rem;margin-bottom:0.6rem">'
                 f'<div style="font-family:\'Playfair Display\',serif;font-size:1.2rem;'
-                f'color:#e8c97e;margin-bottom:0.5rem">{h(firm_name)}</div>'
-                f'<div style="font-size:1.6rem;font-weight:700;color:{bc};margin-bottom:0.4rem">'
-                f'{fmt_inr(stats["balance"])}</div>'
+                f'color:#e8c97e;margin-bottom:0.3rem">{h(firm_name)}</div>'
+                f'<div style="font-size:0.7rem;color:#5a5448;margin-bottom:0.4rem">{h(acct_str)}</div>'
+                f'<div style="font-size:1.6rem;font-weight:700;color:{bc};margin-bottom:0.2rem">'
+                f'{fmt_inr(firm_total)}</div>'
+                f'<div style="font-size:0.6rem;color:#3a3628;margin-bottom:0.4rem">across all accounts</div>'
                 f'<div style="display:flex;gap:1.4rem;font-size:0.75rem;color:#5a5448">'
                 f'<span>{stats["entry_count"]} entries</span>'
                 f'<span>Last: {last_str}</span>'
@@ -199,7 +205,7 @@ if st.session_state.pb_view == "home":
         st.rerun()
 
     # ── Combined Net Balance pill (Part F) ─────────────────────
-    bank_bal  = round(stats_sp["balance"] + stats_mt["balance"], 2)
+    bank_bal  = round(total_sp + total_mt, 2)
     cih_bal   = stats_cih["balance"]
     total_bal = round(bank_bal + cih_bal, 2)
     st.markdown(
@@ -592,7 +598,8 @@ elif st.session_state.pb_view == "firm":
                              if is_pending else
                              f'<span style="color:{bal_color(bal)}">{fmt_inr(bal)}</span>')
 
-                chq_no = str(row.get("cheque_number") or "—")
+                _chq_raw = row.get("cheque_number")
+                chq_no = "—" if (_chq_raw is None or (isinstance(_chq_raw, float) and math.isnan(_chq_raw))) else str(_chq_raw)
                 chq_st = row.get("cheque_status")
 
                 rcols = st.columns(widths)
