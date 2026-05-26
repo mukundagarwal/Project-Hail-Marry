@@ -817,15 +817,16 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
 
         # ── FETCH + FILTER TRANSACTIONS (cached) ─────────────────
         df_t = pd.DataFrame(get_cached_transactions_for_broker(bid))
-        if fmode == "Single Date":
-            df_t = df_t[df_t["date"] == str(st.session_state.filter_single)]
-        elif fmode == "Date Range":
-            df_t = df_t[(df_t["date"] >= str(st.session_state.filter_start)) &
-                        (df_t["date"] <= str(st.session_state.filter_end))]
-        elif fmode == "Payment Due":
-            df_t = df_t[df_t["payment_status"].isin(["Pending","Partial"])]
-        if cust_search:
-            df_t = df_t[df_t["customer_name"].str.contains(cust_search, case=False, na=False)]
+        if not df_t.empty:
+            if fmode == "Single Date":
+                df_t = df_t[df_t["date"] == str(st.session_state.filter_single)]
+            elif fmode == "Date Range":
+                df_t = df_t[(df_t["date"] >= str(st.session_state.filter_start)) &
+                            (df_t["date"] <= str(st.session_state.filter_end))]
+            elif fmode == "Payment Due":
+                df_t = df_t[df_t["payment_status"].isin(["Pending","Partial"])]
+            if cust_search:
+                df_t = df_t[df_t["customer_name"].str.contains(cust_search, case=False, na=False)]
 
         if df_t.empty:
             st.markdown('<div class="empty-state"><div class="es-icon">📋</div>No transactions found.</div>',
