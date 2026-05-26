@@ -9,11 +9,14 @@ Generate a new hash with: python -c "import bcrypt; print(bcrypt.hashpw(b'yourpa
 import time
 import bcrypt
 import streamlit as st
-from utils.db import record_login_attempt, check_lockout, purge_old_login_attempts
+from utils.db import (
+    record_login_attempt, check_lockout, purge_old_login_attempts,
+    LOGIN_MAX_FAILED_ATTEMPTS, LOGIN_LOCKOUT_WINDOW_MINUTES,
+)
 
 # ── Brute-force lockout config ──────────────────────────────────
-_MAX_ATTEMPTS  = 5
-_LOCKOUT_SECS  = 15 * 60   # 15 minutes
+_MAX_ATTEMPTS  = LOGIN_MAX_FAILED_ATTEMPTS
+_LOCKOUT_SECS  = LOGIN_LOCKOUT_WINDOW_MINUTES * 60
 
 # ── Session expiry ──────────────────────────────────────────────
 _SESSION_TTL   = 8 * 60 * 60  # 8 hours
@@ -216,7 +219,7 @@ def require_login() -> None:
             if _db_locked:
                 st.error(
                     f"Too many failed attempts from your connection. "
-                    f"Please try again in {_LOCKOUT_SECS // 60} minutes.",
+                    f"Please try again in {LOGIN_LOCKOUT_WINDOW_MINUTES} minutes.",
                     icon="🔒",
                 )
                 st.stop()
@@ -267,7 +270,7 @@ def require_login() -> None:
                     if attempts >= _MAX_ATTEMPTS:
                         st.session_state._auth_locked_at = time.time()
                         st.error(
-                            f"Too many failed attempts. Locked for {_LOCKOUT_SECS // 60} minutes.",
+                            f"Too many failed attempts. Locked for {LOGIN_LOCKOUT_WINDOW_MINUTES} minutes.",
                             icon="🔒",
                         )
                     else:

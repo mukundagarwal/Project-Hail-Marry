@@ -22,9 +22,16 @@ except ImportError:
     pass
 
 # ── Business constants ─────────────────────────────────────────
-INTEREST_RATE_PCT  = 24.0     # single source of truth
-DEFAULT_GRACE_DAYS = 35
-TXNS_PER_PAGE      = 20
+INTEREST_RATE_PCT              = 24.0   # annual interest rate, percent
+DEFAULT_GRACE_DAYS             = 35     # days before interest starts accruing
+TXNS_PER_PAGE                  = 20     # transactions shown per page in ledger
+BROKERAGE_RATE_PCT             = 1.0    # brokerage charged on bill total, percent
+DAYS_PER_YEAR_30_360           = 360    # denominator in 30/360 interest formula
+DAYS_PER_MONTH_30_360          = 30     # days per month in 30/360 convention
+STOCK_HISTORY_RETENTION_DAYS   = 30     # days of stock history rows to keep
+LOGIN_ATTEMPTS_RETENTION_DAYS  = 7      # days of login attempt rows to keep
+LOGIN_MAX_FAILED_ATTEMPTS      = 5      # failed attempts before lockout triggers
+LOGIN_LOCKOUT_WINDOW_MINUTES   = 15     # rolling window for lockout, minutes
 
 # ── Firm names ─────────────────────────────────────────────────
 FIRM_SP = "SP Spices"
@@ -255,6 +262,7 @@ def get_merged_goods_cached():
 
 
 def invalidate_lookup_cache():
+    """Clear all 5-minute lookup caches. Call after any write to brokers, vendors, or goods."""
     # Call after any write to: brokers, vendors, stock_goods, stock_categories
     # Callers (update this list when adding new write paths):
     #   pages/1_Customer_Payments.py  — add_broker, delete_broker
@@ -616,6 +624,7 @@ def ensure_schema(conn=None):
                 "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS ts TEXT",
             ]:
                 conn.execute(_col_sql)
+            conn.execute("ALTER TABLE audit_log DROP COLUMN IF EXISTS created_at")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS login_attempts (
                     attempt_id   SERIAL PRIMARY KEY,
@@ -741,6 +750,10 @@ def _ensure_schema_once():
 
 
 def get_merged_goods(conn, base_areca: list, base_bp: list) -> dict:
+    """
+    Return merged goods dict keyed by category name, plus '__all__' and '__empty__'.
+    DB rows are merged with the provided base lists; DB extras are appended in insert order.
+    """
     rows = conn.execute("""
         SELECT sc.category_name, sg.good_name
         FROM stock_goods sg
@@ -780,6 +793,7 @@ def get_merged_goods(conn, base_areca: list, base_bp: list) -> dict:
 
 def add_unidentified_stock(conn, category_id: int, location: str,
                             bags: float, quantity_kg: float) -> None:
+    """Add bags/kg to the unidentified_stock row for this category+location (upsert)."""
     conn.execute("""
         INSERT INTO unidentified_stock
             (category_id, location, bags, quantity_kg)
@@ -794,6 +808,7 @@ def add_unidentified_stock(conn, category_id: int, location: str,
 
 def reverse_unidentified_stock(conn, category_id: int, location: str,
                                 bags: float, quantity_kg: float) -> None:
+    """Subtract bags/kg from the unidentified_stock row for this category+location."""
     conn.execute("""
         UPDATE unidentified_stock
            SET bags        = bags        - %s,
@@ -816,6 +831,7 @@ def _now_ts() -> str:
 
 def log_audit(conn, table_name: str, record_id: int, action: str,
               old_value: dict = None, new_value: dict = None):
+    """Insert one row into audit_log. old_value and new_value are JSON-serialised if provided."""
     ph = _db_ph(conn)
     conn.execute(
         f"INSERT INTO audit_log (ts, table_name, record_id, action, old_value, new_value) "
@@ -845,7 +861,8 @@ def record_login_attempt(ip: str, success: bool, conn=None) -> None:
             conn.close()
 
 
-def check_lockout(ip: str, max_attempts: int = 5, window_minutes: int = 15,
+def check_lockout(ip: str, max_attempts: int = LOGIN_MAX_FAILED_ATTEMPTS,
+                  window_minutes: int = LOGIN_LOCKOUT_WINDOW_MINUTES,
                   conn=None) -> tuple:
     """
     Returns (is_locked, failed_count).
@@ -871,7 +888,7 @@ def check_lockout(ip: str, max_attempts: int = 5, window_minutes: int = 15,
             conn.close()
 
 
-def purge_old_login_attempts(days: int = 7, conn=None) -> None:
+def purge_old_login_attempts(days: int = LOGIN_ATTEMPTS_RETENTION_DAYS, conn=None) -> None:
     """Remove login_attempts older than `days` days to keep the table small."""
     from datetime import datetime, timedelta
     _own = conn is None
@@ -895,6 +912,7 @@ def log_stock_change(conn, category_name: str, good_name: str,
                      bags_before: float, bags_after: float,
                      kg_before: float, kg_after: float,
                      source: str = "") -> None:
+    """Append one row to stock_history capturing before/after levels and computed deltas."""
     from datetime import datetime
     conn.execute("""
         INSERT INTO stock_history
@@ -914,8 +932,9 @@ def log_stock_change(conn, category_name: str, good_name: str,
 
 
 def purge_old_stock_history(conn) -> None:
+    """Delete stock_history rows older than STOCK_HISTORY_RETENTION_DAYS days."""
     from datetime import datetime, timedelta
-    cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = (datetime.now() - timedelta(days=STOCK_HISTORY_RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     ph = _db_ph(conn)
     conn.execute(
         f"DELETE FROM stock_history WHERE recorded_at < {ph}",
@@ -924,6 +943,11 @@ def purge_old_stock_history(conn) -> None:
 
 
 def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str) -> list:
+    """
+    Deduct stock for each bill item and log a stock_transfer row.
+    Returns a list of warning strings for items that could not be deducted.
+    Does NOT commit — caller is responsible.
+    """
     _VALID_LOCS = {"Transport", "Shop", "Anandpuri", "Cold"}
     warnings = []
 

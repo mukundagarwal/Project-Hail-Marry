@@ -9,9 +9,10 @@ from utils.db import SRC_OPENING, SRC_CIH_OPENING, FIRM_SP, FIRM_MT
 
 def test_passbook_view_with_conn_returns_dataframe(db):
     """compute_passbook_view(firm, conn=db) must return a DataFrame without error."""
+    import pandas as pd
     df = compute_passbook_view(FIRM_SP, conn=db)
-    assert df is not None
-    assert hasattr(df, "columns")
+    assert isinstance(df, pd.DataFrame)
+    assert {"entry_id", "balance", "source_type", "txn_type"}.issubset(df.columns)
 
 
 def test_passbook_view_without_conn_raises_no_error(db):
@@ -35,10 +36,11 @@ def test_passbook_view_conn_shows_seeded_opening_row(db):
 
 def test_passbook_view_both_firms(db):
     """compute_passbook_view works for both firms using the same conn."""
+    import pandas as pd
     df_sp = compute_passbook_view(FIRM_SP, conn=db)
     df_mt = compute_passbook_view(FIRM_MT, conn=db)
-    assert df_sp is not None
-    assert df_mt is not None
+    assert isinstance(df_sp, pd.DataFrame)
+    assert isinstance(df_mt, pd.DataFrame)
 
 
 def test_passbook_view_conn_not_closed_after_call(db):
@@ -54,9 +56,10 @@ def test_passbook_view_conn_not_closed_after_call(db):
 
 def test_cash_view_with_conn_returns_dataframe(db):
     """compute_cash_view(conn=db) must return a DataFrame without error."""
+    import pandas as pd
     df = compute_cash_view(conn=db)
-    assert df is not None
-    assert hasattr(df, "columns")
+    assert isinstance(df, pd.DataFrame)
+    assert {"entry_id", "balance", "source_type", "txn_type"}.issubset(df.columns)
 
 
 def test_cash_view_conn_not_closed_after_call(db):

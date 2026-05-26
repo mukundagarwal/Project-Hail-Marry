@@ -17,15 +17,18 @@ def test_log_audit_inserts_row(db):
 
 
 def test_log_audit_ts_is_set(db):
-    """The ts column must be populated (not NULL) after log_audit."""
+    """The ts column must be a non-empty ISO-format string after log_audit."""
+    import re
     log_audit(db, "payments", 42, "INSERT")
     db.commit()
     row = db.execute(
         "SELECT ts FROM audit_log WHERE table_name='payments' AND record_id=42"
     ).fetchone()
     assert row is not None
-    assert row["ts"] is not None
-    assert str(row["ts"]) != ""
+    ts_str = str(row["ts"])
+    assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", ts_str), (
+        f"ts must be ISO format YYYY-MM-DDTHH:MM:SS, got: {ts_str!r}"
+    )
 
 
 def test_log_audit_ts_is_recent(db):

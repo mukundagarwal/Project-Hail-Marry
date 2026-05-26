@@ -5,7 +5,10 @@ No Streamlit imports here — pure Python only.
 
 from datetime import datetime, date, timedelta
 
-from utils.db import get_conn, INTEREST_RATE_PCT, _db_ph
+from utils.db import (
+    get_conn, INTEREST_RATE_PCT, _db_ph,
+    BROKERAGE_RATE_PCT, DAYS_PER_YEAR_30_360, DAYS_PER_MONTH_30_360,
+)
 
 # Interest waiver threshold — when remaining principal is at or below this
 # fraction of the original bill, no interest is charged on the remainder.
@@ -46,7 +49,7 @@ def _days_30_360(start: date, end: date) -> int:
     if d2 == 31 and d1 == 30:
         d2 = 30
 
-    return (y2 - y1) * 360 + (m2 - m1) * 30 + (d2 - d1)
+    return (y2 - y1) * DAYS_PER_YEAR_30_360 + (m2 - m1) * DAYS_PER_MONTH_30_360 + (d2 - d1)
 
 
 def _interest_factor(start: date, end: date) -> float:
@@ -54,10 +57,11 @@ def _interest_factor(start: date, end: date) -> float:
     Returns the time fraction for interest accrual
     using the 30/360 day-count convention.
     """
-    return _days_30_360(start, end) / 360.0
+    return _days_30_360(start, end) / DAYS_PER_YEAR_30_360
 
 
 def line_total(bags, bag_rate, qty, rate) -> float:
+    """Compute the total value of one bill line: (bags × bag_rate) + (qty × rate)."""
     return round(bags * bag_rate + qty * rate, 2)
 
 
@@ -120,7 +124,7 @@ def calculate_final_settlement(transaction_id: int,
             _increment    = max(interest_days - prev_int_days, 0)
             # Interest on the full outstanding balance for the incremental period only
             _int_principal = max(0.0, running_principal)
-            interest      = round(_int_principal * (rate / 100) * (_increment / 360.0), 2)
+            interest      = round(_int_principal * (rate / 100) * (_increment / DAYS_PER_YEAR_30_360), 2)
             payment_details.append({
                 "payment_id":        p["payment_id"],
                 "date":              pdate,
@@ -145,7 +149,7 @@ def calculate_final_settlement(transaction_id: int,
         remaining_int_days  = max(_days_30_360(start_date, settle_date) - grace_days, 0)
         # Remaining interest only covers the period from last payment to settlement
         _rem_increment      = max(remaining_int_days - prev_int_days, 0)
-        _rem_factor         = _rem_increment / 360.0
+        _rem_factor         = _rem_increment / DAYS_PER_YEAR_30_360
         _threshold          = round(total_bill * INTEREST_WAIVER_THRESHOLD_PCT / 100.0, 2)
         if max(remaining_principal, 0) <= _threshold:
             remaining_interest = 0.0
@@ -157,7 +161,7 @@ def calculate_final_settlement(transaction_id: int,
         total_interest      = round(total_interest + remaining_interest, 2)
 
         discount_amount  = round(total_bill * disc_pct / 100, 2)
-        brokerage_amount = round(total_bill * 0.01, 2) if brok_flag else 0.0
+        brokerage_amount = round(total_bill * BROKERAGE_RATE_PCT / 100.0, 2) if brok_flag else 0.0
 
         if disc_pct > 0:
             total_interest     = 0.0

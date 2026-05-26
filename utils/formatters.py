@@ -17,6 +17,7 @@ def h(s: object) -> str:
 
 
 def fmt_date(d) -> str:
+    """Format a date-like value as DD/MM/YYYY. Returns '–' for None."""
     if d is None:
         return "–"
     if isinstance(d, str):
@@ -65,6 +66,7 @@ def fmt_inr(amount) -> str:
 
 
 def days_between(start_str, end_date=None) -> int:
+    """Days from start_str (YYYY-MM-DD) to end_date (default: today). Returns 0 on error."""
     try:
         start = datetime.strptime(str(start_str), "%Y-%m-%d").date()
         end   = end_date if isinstance(end_date, date) else date.today()
