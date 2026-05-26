@@ -234,7 +234,7 @@ if st.session_state.page == "customer":
                                              (next_id, name_clean))
                                 conn.commit()
                                 invalidate_lookup_cache()
-                                st.toast(f"Broker '{name_clean}' added.", icon="✓")
+                                st.toast(f"Broker '{name_clean}' added.", icon="✅")
                                 st.rerun()
                             except psycopg2.IntegrityError:
                                 conn.rollback()

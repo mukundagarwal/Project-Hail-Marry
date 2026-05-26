@@ -171,7 +171,7 @@ if st.session_state.stock_page == "home":
                                     ensure_category_at_all_locations(c2, _c2_id)
                                 c2.close()
                                 invalidate_lookup_cache()
-                                st.toast(f"Category '{name}' added.", icon="✓")
+                                st.toast(f"Category '{name}' added.", icon="✅")
                                 st.rerun()
                             except psycopg2.errors.UniqueViolation:
                                 st.error(f"'{name}' already exists.")

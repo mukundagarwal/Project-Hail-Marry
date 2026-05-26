@@ -458,7 +458,7 @@ elif st.session_state.pb_page == "firm":
                                     entry_date = EXCLUDED.entry_date
                             """, (firm, str(ob_date), abs(_oa), _otype, SRC_OPENING))
                         st.session_state.pb_show_ob_form = False
-                        st.toast("Opening balance updated.", icon="✓")
+                        st.toast("Opening balance updated.", icon="✅")
                         st.rerun()
                 with obs2:
                     if st.form_submit_button("✕ Cancel", use_container_width=True):
@@ -1088,7 +1088,7 @@ elif st.session_state.pb_page == "cash":
                             (str(ca_date), _cdet, round(ca_amount, 2),
                              ca_type, SRC_MANUAL))
                     st.session_state.pb_show_cih_add_form = False
-                    st.toast("Transaction saved.", icon="✓")
+                    st.toast("Transaction saved.", icon="✅")
                     st.rerun()
             if _cih_cancel:
                 st.session_state.pb_show_cih_add_form = False
@@ -1153,7 +1153,7 @@ elif st.session_state.pb_page == "cash":
                     """, (str(cob_date), 'Opening Balance',
                           abs(_coa), _cotype, SRC_CIH_OPENING))
                 st.session_state.pb_show_cih_ob_form = False
-                st.toast("Opening balance updated.", icon="✓")
+                st.toast("Opening balance updated.", icon="✅")
                 st.rerun()
             if _cob_cancel:
                 st.session_state.pb_show_cih_ob_form = False

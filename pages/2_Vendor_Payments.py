@@ -366,7 +366,7 @@ def _payment_popover(vendor_id: int, ledger_type: str, firm, conn):
                                 "(entry_date,details,amount,txn_type,source_type,source_id) "
                                 "VALUES (%s,%s,%s,%s,%s,%s)",
                                 (str(p_date), _vname, p_amt, 'Debit', SRC_VENDOR_UB, new_eid))
-                    st.toast(f"Payment of {fmt_inr(p_amt)} recorded.", icon="✓")
+                    st.toast(f"Payment of {fmt_inr(p_amt)} recorded.", icon="✅")
                     st.rerun()
 
 
@@ -928,7 +928,7 @@ if st.session_state.vp_page == "home":
                                     (int(max_id) + 1, nm))
                                 conn.commit()
                                 invalidate_lookup_cache()
-                                st.toast(f"Vendor '{nm}' added.", icon="✓")
+                                st.toast(f"Vendor '{nm}' added.", icon="✅")
                                 st.rerun()
                             except psycopg2.errors.UniqueViolation:
                                 st.error(f"'{nm}' already exists.")
