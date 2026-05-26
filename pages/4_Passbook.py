@@ -126,14 +126,6 @@ def cih_source_badge(source_type: str) -> str:
     return _MAP.get(source_type or SRC_MANUAL, h(source_type or ""))
 
 
-def _get_all_customers(conn) -> list:
-    """Return sorted list of distinct customer names from customer_transactions."""
-    rows = conn.execute(
-        "SELECT DISTINCT customer_name FROM customer_transactions ORDER BY customer_name"
-    ).fetchall()
-    return [r["customer_name"] for r in rows]
-
-
 
 
 # ══════════════════════════════════════════════════════════════
@@ -372,7 +364,7 @@ elif st.session_state.pb_view == "firm":
             a_chq_no = st.text_input("Cheque Number (optional)", key="pb_af_chqno")
             a_chq_st = None
             if a_chq_no.strip():
-                a_chq_st = st.radio("Cheque Status", ["Pending", "Cleared"],
+                a_chq_st = st.radio("Cheque Status", [CHQ_PENDING, CHQ_CLEARED],
                                     horizontal=True, key="pb_af_chqst")
 
             af_s1, af_s2, _ = st.columns([1, 1, 4])

@@ -495,7 +495,7 @@ def _edit_form(entry_row, conn):
             # Firm radio for RTGS bills (FIX 3)
             if entry_row.get("ledger_type") == "RTGS":
                 _firm_idx = 0 if str(entry_row.get("firm", "")) == FIRM_SP else 1
-                new_firm = st.radio("Firm", ["SP Spices", "Mukund Traders"],
+                new_firm = st.radio("Firm", [FIRM_SP, FIRM_MT],
                                     index=_firm_idx, horizontal=True,
                                     key=f"efirm_{entry_id}")
             else:
@@ -513,7 +513,7 @@ def _edit_form(entry_row, conn):
             # Firm radio for RTGS payments (FIX 3)
             if entry_row.get("ledger_type") == "RTGS":
                 _firm_idx = 0 if str(entry_row.get("firm", "")) == FIRM_SP else 1
-                new_firm = st.radio("Firm", ["SP Spices", "Mukund Traders"],
+                new_firm = st.radio("Firm", [FIRM_SP, FIRM_MT],
                                     index=_firm_idx, horizontal=True,
                                     key=f"efirm_{entry_id}")
             else:

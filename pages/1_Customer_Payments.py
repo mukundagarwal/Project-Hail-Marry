@@ -1223,7 +1223,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                             value=_ep_chq_default, key=f"epcd_{tid}_{pid_p}")
                                     _ep_dep_default = str(p.get("deposit_firm") or FIRM_SP)
                                     ep_dep_firm = st.radio(
-                                        "Deposit to", ["SP Spices", "Mukund Traders"],
+                                        "Deposit to", list(FIRMS),
                                         horizontal=True,
                                         index=0 if _ep_dep_default == FIRM_SP else 1,
                                         key=f"epdepf_{tid}_{pid_p}")
@@ -1388,7 +1388,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                 p_chq_date = st.date_input("Cheque Date", value=p_date,
                                                            key=f"pchqd_{tid}")
                             p_dep_firm = st.radio(
-                                "Deposit to", ["SP Spices", "Mukund Traders"],
+                                "Deposit to", list(FIRMS),
                                 horizontal=True, index=0, key=f"pdepf_{tid}")
                             p_dep_account = st.selectbox(
                                 "Bank Account",
@@ -1631,7 +1631,7 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                     "Cheque Date", value=date.today(),
                                     key=f"sett_chqdt_{tid}")
                             sett_dep_firm = st.radio(
-                                "Deposit to", ["SP Spices", "Mukund Traders"],
+                                "Deposit to", list(FIRMS),
                                 horizontal=True, index=0,
                                 key=f"sett_depf_{tid}")
                             sett_dep_account = st.selectbox(

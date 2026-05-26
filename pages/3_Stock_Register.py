@@ -1153,15 +1153,19 @@ elif st.session_state.stock_page == "category":
                     f"🔧 Reset negative values to 0 at {upd_loc}",
                     key=f"reset_neg_{upd_loc}"
                 ):
-                    conn.execute(
-                        "UPDATE stock_levels "
-                        "SET bags        = CASE WHEN bags        < 0 THEN 0 ELSE bags        END, "
-                        "    quantity_kg = CASE WHEN quantity_kg < 0 THEN 0 ELSE quantity_kg END "
-                        "WHERE location = %s",
-                        (upd_loc,))
-                    conn.commit()
-                    st.success(f"✓ All negative values at {upd_loc} reset to 0.")
-                    st.rerun()
+                    try:
+                        conn.execute(
+                            "UPDATE stock_levels "
+                            "SET bags        = CASE WHEN bags        < 0 THEN 0 ELSE bags        END, "
+                            "    quantity_kg = CASE WHEN quantity_kg < 0 THEN 0 ELSE quantity_kg END "
+                            "WHERE location = %s",
+                            (upd_loc,))
+                        conn.commit()
+                        st.success(f"✓ All negative values at {upd_loc} reset to 0.")
+                        st.rerun()
+                    except Exception as e:
+                        conn.rollback()
+                        st.error(f"Reset failed: {e}")
 
             # ── Add Batch to existing good ────────────────────────
             if goods:
@@ -1259,14 +1263,18 @@ elif st.session_state.stock_page == "category":
                                     key=f"del_batch_{upd_loc}_{_dgid}_{_dblabel}",
                                     use_container_width=True,
                                     type="primary"):
-                                conn.execute(
-                                    "DELETE FROM stock_levels "
-                                    "WHERE good_id=%s AND location=%s "
-                                    "AND batch_label=%s",
-                                    (_dgid, upd_loc, _dblabel))
-                                conn.commit()
-                                st.success(f"✓ Batch '{_dblabel}' deleted.")
-                                st.rerun()
+                                try:
+                                    conn.execute(
+                                        "DELETE FROM stock_levels "
+                                        "WHERE good_id=%s AND location=%s "
+                                        "AND batch_label=%s",
+                                        (_dgid, upd_loc, _dblabel))
+                                    conn.commit()
+                                    st.success(f"✓ Batch '{_dblabel}' deleted.")
+                                    st.rerun()
+                                except Exception as e:
+                                    conn.rollback()
+                                    st.error(f"Delete failed: {e}")
 
             # ── Add New Good sub-form ─────────────────────────────
             st.markdown(
