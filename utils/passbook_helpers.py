@@ -50,22 +50,17 @@ def compute_passbook_view(firm: str, bank_account: str = DEFAULT_BANK_ACCOUNT,
                 CASE WHEN txn_type = 'Credit' THEN amount ELSE -amount END
                     AS signed_amount,
                 SUM(
-                    CASE WHEN (cheque_status IS NULL OR cheque_status != 'Pending')
+                    CASE WHEN (cheque_status IS NULL OR cheque_status != 'Pending'
+                               OR source_type = {ph})
                          THEN CASE WHEN txn_type = 'Credit' THEN amount ELSE -amount END
                          ELSE 0.0
                     END
-                ) OVER (ORDER BY
-                            CASE WHEN source_type = {ph} THEN 0 ELSE 1 END ASC,
-                            entry_date ASC,
-                            entry_id ASC
+                ) OVER (ORDER BY entry_date ASC, entry_id ASC
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
                     AS _running_cleared
             FROM passbook_entries WHERE firm = {ph} AND bank_account = {ph}
-            ORDER BY
-                CASE WHEN source_type = {ph} THEN 0 ELSE 1 END ASC,
-                entry_date ASC,
-                entry_id ASC
-        """, (SRC_OPENING, firm, bank_account, SRC_OPENING)).fetchall()
+            ORDER BY entry_date DESC, entry_id DESC
+        """, (SRC_OPENING, firm, bank_account)).fetchall()
     finally:
         if _own_conn:
             conn.close()
@@ -88,7 +83,7 @@ def compute_passbook_view(firm: str, bank_account: str = DEFAULT_BANK_ACCOUNT,
     )
     df.drop(columns=["_running_cleared"], inplace=True)
     df["s_no"] = range(1, len(df) + 1)
-    return df.iloc[::-1].reset_index(drop=True)
+    return df.reset_index(drop=True)
 
 
 def compute_cash_view(conn=None) -> pd.DataFrame:

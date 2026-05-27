@@ -1004,6 +1004,18 @@ def ensure_schema(conn=None):
                 (_cih_ob["opening_date"], 'Opening Balance',
                  abs(_coa), _ctype, SRC_CIH_OPENING))
 
+        # One-time fix: clear any stale cheque_status on Opening rows.
+        # The ON CONFLICT upsert previously omitted resetting these columns,
+        # so existing Opening rows may have inherited a prior cheque_status='Pending'
+        # which caused the window function to exclude the Opening credit from the
+        # running balance, producing incorrect negative balances.
+        conn.execute(f"""
+            UPDATE passbook_entries
+            SET cheque_status = NULL, cheque_number = NULL
+            WHERE source_type = {ph}
+              AND (cheque_status IS NOT NULL OR cheque_number IS NOT NULL)
+        """, (SRC_OPENING,))
+
         conn.commit()
         if _own:
             _schema_initialized = True

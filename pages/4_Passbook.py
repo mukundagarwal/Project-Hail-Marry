@@ -481,9 +481,11 @@ elif st.session_state.pb_view == "firm":
                                 VALUES (%s, %s, 'Opening Balance', %s, %s, %s, %s)
                                 ON CONFLICT (firm, bank_account) WHERE source_type = 'Opening'
                                 DO UPDATE SET
-                                    amount     = EXCLUDED.amount,
-                                    txn_type   = EXCLUDED.txn_type,
-                                    entry_date = EXCLUDED.entry_date
+                                    amount        = EXCLUDED.amount,
+                                    txn_type      = EXCLUDED.txn_type,
+                                    entry_date    = EXCLUDED.entry_date,
+                                    cheque_status = NULL,
+                                    cheque_number = NULL
                             """, (firm, str(ob_date), abs(_oa), _otype, SRC_OPENING, account))
                         st.session_state.pb_show_ob_form = False
                         st.toast("Opening balance updated.", icon="✅")
