@@ -1844,16 +1844,6 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                         _days_overdue = r.get("remaining_int_days", 0)
                                         _sv_chq_no    = sett_chq_no.strip() if sett_chq_no else None
                                         _sv_chq_dt    = str(sett_chq_date) if sett_chq_date else None
-                                        # Reads pulled before the atomic block
-                                        _brow4 = conn.execute(
-                                            "SELECT broker_name FROM brokers WHERE broker_id=%s",
-                                            (bid,)).fetchone()
-                                        _bn4  = _brow4["broker_name"] if _brow4 else ""
-                                        _det4 = f"{txn['customer_name']} (via {_bn4})"
-                                        _existing_pb = conn.execute(
-                                            "SELECT entry_id FROM passbook_entries "
-                                            "WHERE source_type=%s AND source_id=%s",
-                                            (SRC_CUST_CHQ_TXN, tid)).fetchone()
 
                                         with conn:
                                             conn.execute(
@@ -1881,89 +1871,20 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                                  "total_interest": r["total_interest"],
                                                                  "grace_days": gd_disp,
                                                                  "days_overdue": _days_overdue})
-                                            # ── Passbook sync: settlement cheque ──
-                                            _pb_chq_amt = round(r["final_balance_due"], 2)
-                                            if (sett_method == "Cheque" and _sv_chq_no
-                                                    and sett_dep_firm and _pb_chq_amt > 0):
-                                                if _existing_pb:
-                                                    conn.execute(
-                                                        "UPDATE passbook_entries "
-                                                        "SET firm=%s,entry_date=%s,details=%s,"
-                                                        "amount=%s,cheque_number=%s "
-                                                        "WHERE entry_id=%s",
-                                                        (sett_dep_firm,
-                                                         _sv_chq_dt or str(date.today()),
-                                                         _det4,
-                                                         _pb_chq_amt,
-                                                         _sv_chq_no, _existing_pb["entry_id"]))
-                                                else:
-                                                    conn.execute(
-                                                        "INSERT INTO passbook_entries "
-                                                        "(firm,entry_date,details,amount,txn_type,"
-                                                        " cheque_number,cheque_status,"
-                                                        " source_type,source_id,bank_account) "
-                                                        "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s,%s,%s)",
-                                                        (sett_dep_firm,
-                                                         _sv_chq_dt or str(date.today()),
-                                                         _det4,
-                                                         _pb_chq_amt,
-                                                         _sv_chq_no,
-                                                         CHQ_PENDING,
-                                                         SRC_CUST_CHQ_TXN, tid,
-                                                         sett_dep_account or DEFAULT_BANK_ACCOUNT))
-                                            else:
-                                                # Non-cheque method, or overpayment (balance <= 0)
-                                                conn.execute(
-                                                    "DELETE FROM passbook_entries "
-                                                    "WHERE source_type=%s AND source_id=%s",
-                                                    (SRC_CUST_CHQ_TXN, tid))
-                                            # ── CASH IN HAND SYNC — Settlement path ──────────────────
-                                            if sett_method == "Cash" and float(_p_to_save or 0) > 0:
-                                                _existing_cih = conn.execute("""
-                                                    SELECT COALESCE(SUM(c.amount), 0) AS v
-                                                    FROM cash_in_hand_entries c
-                                                    JOIN payments p
-                                                      ON c.source_id = p.payment_id
-                                                     AND c.source_type = %s
-                                                    WHERE p.transaction_id = %s
-                                                """, (SRC_CUSTOMER_CASH, tid)).fetchone()["v"]
-                                                _existing_cih = round(float(_existing_cih or 0), 2)
-                                                _sett_amount  = round(float(_p_to_save), 2)
-                                                _gap          = round(_sett_amount - _existing_cih, 2)
-                                                _sett_cih_row = conn.execute(
-                                                    "SELECT entry_id FROM cash_in_hand_entries "
-                                                    "WHERE source_type=%s AND source_id=%s",
-                                                    (SRC_CUSTOMER_CASH, tid)).fetchone()
-                                                _cih_detail = (
-                                                    f"Cash from {_bn4} "
-                                                    f"(Txn: {fmt_date(str(txn['date']))})"
-                                                )
-                                                if _gap > 0.01:
-                                                    if _sett_cih_row:
-                                                        conn.execute(
-                                                            "UPDATE cash_in_hand_entries "
-                                                            "SET amount=%s, entry_date=%s, details=%s "
-                                                            "WHERE source_type=%s AND source_id=%s",
-                                                            (_gap, str(settle_date_input),
-                                                             _cih_detail,
-                                                             SRC_CUSTOMER_CASH, tid))
-                                                    else:
-                                                        conn.execute(
-                                                            "INSERT INTO cash_in_hand_entries "
-                                                            "(entry_date, details, amount, txn_type,"
-                                                            " source_type, source_id) "
-                                                            "VALUES (%s, %s, %s, 'Credit', %s, %s)",
-                                                            (str(settle_date_input), _cih_detail,
-                                                             _gap, SRC_CUSTOMER_CASH, tid))
-                                                elif _sett_cih_row:
-                                                    conn.execute(
-                                                        "DELETE FROM cash_in_hand_entries "
-                                                        "WHERE source_type=%s AND source_id=%s",
-                                                        (SRC_CUSTOMER_CASH, tid))
-                                            # ── END CASH IN HAND SYNC ────────────────────────────────
+                                            # Settlement no longer auto-syncs to passbook or CIH.
+                                            # Passbook is updated manually by the user.
+                                            # Clean up any entries created by earlier saves.
+                                            conn.execute(
+                                                "DELETE FROM passbook_entries "
+                                                "WHERE source_type=%s AND source_id=%s",
+                                                (SRC_CUST_CHQ_TXN, tid))
+                                            conn.execute(
+                                                "DELETE FROM cash_in_hand_entries "
+                                                "WHERE source_type=%s AND source_id=%s",
+                                                (SRC_CUSTOMER_CASH, tid))
                                         _overpay_note = ""
                                         if round(r["final_balance_due"], 2) <= 0:
-                                            _overpay_note = " Overpayment — no passbook entry created (refund due to customer)."
+                                            _overpay_note = " Overpayment detected — refund due to customer."
                                         st.session_state[calc_key] = False
                                         st.session_state.pop(f"preview_{tid}", None)
                                         if tid in st.session_state.get("sum_intercept", []):
