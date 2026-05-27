@@ -26,7 +26,7 @@ from utils.db import (
     SRC_MANUAL, SRC_VENDOR_RTGS,
     SRC_CUST_CHQ_TXN, SRC_CUST_CHQ_PMT,
     SRC_ALLOCATION, SRC_OPENING,
-    SRC_CUSTOMER_CASH,
+    SRC_CUSTOMER_CASH, SRC_SETTLEMENT_CASH,
     CHQ_PENDING, CHQ_CLEARED,
 )
 from utils.formatters import fmt_date, fmt_inr, parse_slash_amount, days_between, h
@@ -1608,6 +1608,11 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                         "  WHERE transaction_id=%s "
                                         "  AND method IN ('UPI', 'Bank Transfer')"
                                         ")", (SRC_MANUAL, tid))
+                                    # Remove settlement CIH entry if Paid was set
+                                    conn.execute(
+                                        "DELETE FROM cash_in_hand_entries "
+                                        "WHERE source_type=%s AND source_id=%s",
+                                        (SRC_SETTLEMENT_CASH, tid))
                                     conn.execute("DELETE FROM payments WHERE transaction_id=%s", (tid,))
                                     conn.execute("DELETE FROM transaction_items WHERE transaction_id=%s", (tid,))
                                     conn.execute("DELETE FROM customer_transactions WHERE transaction_id=%s", (tid,))
@@ -1698,30 +1703,6 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                             "SELECT COALESCE(SUM(amount),0) s FROM payments WHERE transaction_id=%s",
                             conn, params=(tid,)).iloc[0]["s"])
 
-                        _SETT_METHODS = ["Cash","UPI","Bank Transfer","Cheque"]
-                        sett_method = st.selectbox(
-                            "Payment Method for Settlement", _SETT_METHODS,
-                            key=f"sett_method_{tid}")
-                        if sett_method == "Cheque":
-                            scol1, scol2 = st.columns(2)
-                            with scol1:
-                                sett_chq_no = st.text_input(
-                                    "Cheque Number", key=f"sett_chqno_{tid}")
-                            with scol2:
-                                sett_chq_date = st.date_input(
-                                    "Cheque Date", value=date.today(),
-                                    key=f"sett_chqdt_{tid}")
-                            sett_dep_firm = st.radio(
-                                "Deposit to", list(FIRMS),
-                                horizontal=True, index=0,
-                                key=f"sett_depf_{tid}")
-                            sett_dep_account = st.selectbox(
-                                "Bank Account",
-                                BANK_ACCOUNTS.get(sett_dep_firm, (DEFAULT_BANK_ACCOUNT,)),
-                                index=0, key=f"sett_depacct_{tid}")
-                        else:
-                            sett_chq_no, sett_chq_date, sett_dep_firm, sett_dep_account = None, None, None, None
-
                         # Discount section outside form so "Custom Amount" shows dynamically
                         _prev_disc_amt = float(txn.get("discount_amount", 0) or 0)
                         if prev_dpct == 0.5:
@@ -1774,9 +1755,6 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                     help="Days excluded from interest calculation")
 
                             if st.form_submit_button("🔍  Preview Bill", use_container_width=True):
-                                if sett_method == "Cheque" and not (sett_chq_no and sett_chq_no.strip()):
-                                    st.error("Cheque Number is required for Cheque payment.")
-                                    st.stop()
                                 try:
                                     P_val  = parse_slash_amount(P_s)
                                 except Exception:
@@ -1910,65 +1888,51 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                             sc1, sc2 = st.columns(2)
                             with sc1:
                                 if st.button("💾  Save Settlement", key=f"commit_{tid}", use_container_width=True):
-                                    if sett_method == "Cheque" and not (sett_chq_no and sett_chq_no.strip()):
-                                        st.error("Cheque Number is required for Cheque payment.")
-                                    else:
-                                        _actual_paid = float(conn.execute(
-                                            "SELECT COALESCE(SUM(amount),0) AS v FROM payments WHERE transaction_id=%s",
-                                            (tid,)).fetchone()["v"])
-                                        _p_to_save    = _actual_paid if _actual_paid > 0 else P_disp
-                                        _days_overdue = r.get("remaining_int_days", 0)
-                                        _sv_chq_no    = sett_chq_no.strip() if sett_chq_no else None
-                                        _sv_chq_dt    = str(sett_chq_date) if sett_chq_date else None
+                                    _actual_paid = float(conn.execute(
+                                        "SELECT COALESCE(SUM(amount),0) AS v FROM payments WHERE transaction_id=%s",
+                                        (tid,)).fetchone()["v"])
+                                    _p_to_save    = _actual_paid if _actual_paid > 0 else P_disp
+                                    _days_overdue = r.get("remaining_int_days", 0)
 
-                                        with conn:
+                                    with conn:
+                                        conn.execute(
+                                            "UPDATE customer_transactions SET "
+                                            "interest_rate_pct=%s,discount_pct=%s,discount_amount=%s,"
+                                            "brokerage_applied=%s,brokerage_amount=%s,"
+                                            "interest_amount=%s,final_settlement=%s,"
+                                            "payment_received=%s,grace_days=%s,days_overdue=%s,"
+                                            "payment_method='Cash',cheque_number=NULL,cheque_date=NULL,"
+                                            "deposit_firm=NULL,calc_status='Calculated' "
+                                            "WHERE transaction_id=%s",
+                                            (INTEREST_RATE_PCT, d_p, r["discount_amount"],
+                                             1 if b_f else 0, r["brokerage_amount"],
+                                             r["total_interest"], r["final_balance_due"],
+                                             _p_to_save, gd_disp, _days_overdue, tid))
+                                        for pmt in r.get("payments", []):
                                             conn.execute(
-                                                "UPDATE customer_transactions SET "
-                                                "interest_rate_pct=%s,discount_pct=%s,discount_amount=%s,"
-                                                "brokerage_applied=%s,brokerage_amount=%s,"
-                                                "interest_amount=%s,final_settlement=%s,"
-                                                "payment_received=%s,grace_days=%s,days_overdue=%s,"
-                                                "payment_method=%s,cheque_number=%s,cheque_date=%s,"
-                                                "deposit_firm=%s,calc_status='Calculated' "
-                                                "WHERE transaction_id=%s",
-                                                (INTEREST_RATE_PCT, d_p, r["discount_amount"],
-                                                 1 if b_f else 0, r["brokerage_amount"],
-                                                 r["total_interest"], r["final_balance_due"],
-                                                 _p_to_save, gd_disp, _days_overdue,
-                                                 sett_method, _sv_chq_no, _sv_chq_dt,
-                                                 sett_dep_firm, tid))
-                                            for pmt in r.get("payments", []):
-                                                conn.execute(
-                                                    "UPDATE payments SET interest_charged=%s,days_from_start=%s "
-                                                    "WHERE payment_id=%s",
-                                                    (pmt["interest"], pmt["days"], pmt["payment_id"]))
-                                            log_audit(conn, "customer_transactions", tid, "SETTLEMENT",
-                                                      new_value={"final_balance_due": r["final_balance_due"],
-                                                                 "total_interest": r["total_interest"],
-                                                                 "grace_days": gd_disp,
-                                                                 "days_overdue": _days_overdue})
-                                            # Settlement no longer auto-syncs to passbook or CIH.
-                                            # Passbook is updated manually by the user.
-                                            # Clean up any entries created by earlier saves.
-                                            conn.execute(
-                                                "DELETE FROM passbook_entries "
-                                                "WHERE source_type=%s AND source_id=%s",
-                                                (SRC_CUST_CHQ_TXN, tid))
-                                            conn.execute(
-                                                "DELETE FROM cash_in_hand_entries "
-                                                "WHERE source_type=%s AND source_id=%s",
-                                                (SRC_CUSTOMER_CASH, tid))
-                                        _overpay_note = ""
-                                        if round(r["final_balance_due"], 2) <= 0:
-                                            _overpay_note = " Overpayment detected — refund due to customer."
-                                        st.session_state[calc_key] = False
-                                        st.session_state.pop(f"preview_{tid}", None)
-                                        if tid in st.session_state.get("sum_intercept", []):
-                                            st.session_state.sum_intercept.remove(tid)
-                                        st.success(f"✓ Settlement {fmt_inr(r['final_balance_due'])} saved.{_overpay_note}")
-                                        clear_passbook_cache()
-                                        invalidate_customer_cache()
-                                        st.rerun()
+                                                "UPDATE payments SET interest_charged=%s,days_from_start=%s "
+                                                "WHERE payment_id=%s",
+                                                (pmt["interest"], pmt["days"], pmt["payment_id"]))
+                                        log_audit(conn, "customer_transactions", tid, "SETTLEMENT",
+                                                  new_value={"final_balance_due": r["final_balance_due"],
+                                                             "total_interest": r["total_interest"],
+                                                             "grace_days": gd_disp,
+                                                             "days_overdue": _days_overdue})
+                                        conn.execute(
+                                            "DELETE FROM passbook_entries "
+                                            "WHERE source_type=%s AND source_id=%s",
+                                            (SRC_CUST_CHQ_TXN, tid))
+                                    _overpay_note = ""
+                                    if round(r["final_balance_due"], 2) <= 0:
+                                        _overpay_note = " Overpayment detected — refund due to customer."
+                                    st.session_state[calc_key] = False
+                                    st.session_state.pop(f"preview_{tid}", None)
+                                    if tid in st.session_state.get("sum_intercept", []):
+                                        st.session_state.sum_intercept.remove(tid)
+                                    st.success(f"✓ Settlement {fmt_inr(r['final_balance_due'])} saved.{_overpay_note}")
+                                    clear_passbook_cache()
+                                    invalidate_customer_cache()
+                                    st.rerun()
                             with sc2:
                                 if st.button("Cancel", key=f"cancel_calc_{tid}", use_container_width=True):
                                     st.session_state[calc_key] = False
@@ -2016,12 +1980,48 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                             st.error("Invalid Bill Sent amount.")
                                             _u_bs_ok = False
                                     if _u_bs_ok:
-                                        conn.execute(
-                                            "UPDATE customer_transactions "
-                                            "SET customer_name=%s,date=%s,payment_status=%s,"
-                                            "bill_sent=%s WHERE transaction_id=%s",
-                                            (u_name, str(u_date), u_status, _u_bs_save, tid))
-                                        conn.commit()
+                                        _old_status = str(txn["payment_status"])
+                                        # Block "Paid" if bill has not been calculated
+                                        if u_status == "Paid" and _old_status != "Paid":
+                                            _fs_raw = txn.get("final_settlement")
+                                            _cs_raw = str(txn.get("calc_status", ""))
+                                            if _cs_raw != "Calculated" or _fs_raw is None:
+                                                st.error(
+                                                    "Please calculate the bill first "
+                                                    "before marking as Paid.")
+                                                _u_bs_ok = False
+                                    if _u_bs_ok:
+                                        with conn:
+                                            conn.execute(
+                                                "UPDATE customer_transactions "
+                                                "SET customer_name=%s,date=%s,payment_status=%s,"
+                                                "bill_sent=%s WHERE transaction_id=%s",
+                                                (u_name, str(u_date), u_status, _u_bs_save, tid))
+                                            _old_status = str(txn["payment_status"])
+                                            # ── CIH sync: Paid toggle ──────────────────────
+                                            if u_status == "Paid" and _old_status != "Paid":
+                                                _fs_val = round(float(txn["final_settlement"]), 2)
+                                                _existing = conn.execute(
+                                                    "SELECT entry_id FROM cash_in_hand_entries "
+                                                    "WHERE source_type=%s AND source_id=%s",
+                                                    (SRC_SETTLEMENT_CASH, tid)).fetchone()
+                                                if not _existing and abs(_fs_val) > 0.001:
+                                                    _cih_type = "Credit" if _fs_val > 0 else "Debit"
+                                                    conn.execute(
+                                                        "INSERT INTO cash_in_hand_entries "
+                                                        "(entry_date,details,amount,txn_type,"
+                                                        " source_type,source_id) "
+                                                        "VALUES (%s,%s,%s,%s,%s,%s)",
+                                                        (str(u_date),
+                                                         f"{u_name} — Final Settlement",
+                                                         abs(_fs_val), _cih_type,
+                                                         SRC_SETTLEMENT_CASH, tid))
+                                            elif u_status != "Paid" and _old_status == "Paid":
+                                                conn.execute(
+                                                    "DELETE FROM cash_in_hand_entries "
+                                                    "WHERE source_type=%s AND source_id=%s",
+                                                    (SRC_SETTLEMENT_CASH, tid))
+                                        clear_passbook_cache()
                                         invalidate_customer_cache()
                                         st.session_state[edit_key] = False; st.rerun()
                             with fc2:

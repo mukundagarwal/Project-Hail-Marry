@@ -54,9 +54,10 @@ SRC_ALLOCATION   = "CustomerAllocation"
 SRC_OPENING      = "Opening"
 
 # ── Cash in Hand source types ──────────────────────────────────
-SRC_CUSTOMER_CASH = "CustomerCash"
-SRC_VENDOR_UB     = "VendorUB"
-SRC_CIH_OPENING   = "CIHOpening"
+SRC_CUSTOMER_CASH    = "CustomerCash"
+SRC_SETTLEMENT_CASH  = "SettlementCash"
+SRC_VENDOR_UB        = "VendorUB"
+SRC_CIH_OPENING      = "CIHOpening"
 
 # ── Cheque statuses ─────────────────────────────────────────────
 CHQ_PENDING = "Pending"
