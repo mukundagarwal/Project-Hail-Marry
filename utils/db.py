@@ -569,7 +569,8 @@ def _sqlite_ddl(conn):
             cheque_date   TEXT DEFAULT '',
             source_type   TEXT NOT NULL DEFAULT 'Manual',
             source_id     INTEGER,
-            bank_account  TEXT NOT NULL DEFAULT 'Unknown'
+            bank_account  TEXT NOT NULL DEFAULT 'Unknown',
+            notes         TEXT NOT NULL DEFAULT ''
         )""",
         """CREATE TABLE IF NOT EXISTS passbook_opening_balance (
             firm           TEXT PRIMARY KEY,
@@ -585,6 +586,7 @@ def _sqlite_ddl(conn):
             txn_type    TEXT NOT NULL,
             source_type TEXT NOT NULL DEFAULT 'Manual',
             source_id   INTEGER,
+            notes       TEXT NOT NULL DEFAULT '',
             UNIQUE (source_type, source_id)
         )""",
         """CREATE TABLE IF NOT EXISTS cash_in_hand_opening (
@@ -845,6 +847,8 @@ def ensure_schema(conn=None):
                 "ALTER TABLE customer_transactions ADD COLUMN IF NOT EXISTS grace_days INTEGER DEFAULT 35",
                 "ALTER TABLE customer_transactions ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT ''",
                 "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS ts TEXT",
+                "ALTER TABLE passbook_entries ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT ''",
+                "ALTER TABLE cash_in_hand_entries ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT ''",
             ]:
                 conn.execute(_col_sql)
             conn.execute("ALTER TABLE audit_log DROP COLUMN IF EXISTS created_at")

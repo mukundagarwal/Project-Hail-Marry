@@ -372,6 +372,7 @@ elif st.session_state.pb_view == "firm":
             if a_chq_no.strip():
                 a_chq_st = st.radio("Cheque Status", [CHQ_PENDING, CHQ_CLEARED],
                                     horizontal=True, key="pb_af_chqst")
+            a_note = st.text_input("Note (optional)", key="pb_af_note")
 
             af_s1, af_s2, _ = st.columns([1, 1, 4])
             with af_s1:
@@ -392,12 +393,13 @@ elif st.session_state.pb_view == "firm":
                             _cur = conn.execute(
                                 "INSERT INTO passbook_entries "
                                 "(firm,entry_date,details,amount,txn_type,"
-                                " cheque_number,cheque_status,source_type,bank_account) "
-                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                                " cheque_number,cheque_status,source_type,bank_account,notes) "
+                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                                 "RETURNING entry_id",
                                 (firm, str(a_date), _det,
                                  round(a_amount, 2), a_type,
-                                 _chq_no, _chq_st, SRC_MANUAL, account))
+                                 _chq_no, _chq_st, SRC_MANUAL, account,
+                                 (a_note or "").strip()))
                             new_eid = _cur.fetchone()["entry_id"]
 
                             # If user chose a specific customer (not Suspense / new name),
@@ -612,8 +614,14 @@ elif st.session_state.pb_view == "firm":
                     st.markdown(f'<div style="{_CELL};{row_bg}color:#c8bfa8">'
                                 f'{fmt_date(row["entry_date"])}</div>', unsafe_allow_html=True)
                 with rcols[2]:
+                    _note_html = ""
+                    _row_note  = str(row.get("notes") or "").strip()
+                    if _row_note:
+                        _note_html = (f'<div style="font-size:0.68rem;color:#5a5448;'
+                                      f'margin-top:1px">{h(_row_note)}</div>')
                     st.markdown(f'<div style="{_CELL};{row_bg}color:#c8bfa8">'
-                                f'{h(str(row["details"]))}</div>', unsafe_allow_html=True)
+                                f'{h(str(row["details"]))}{_note_html}</div>',
+                                unsafe_allow_html=True)
                 with rcols[3]:
                     st.markdown(
                         f'<div style="{_CELL};{row_bg}color:{amt_color};'
@@ -917,6 +925,9 @@ elif st.session_state.pb_view == "firm":
                             ne_chq_st = st.radio(
                                 "Cheque Status", ["Pending", "Cleared"],
                                 horizontal=True, index=_ci, key=f"pb_efcs_{eid}")
+                        ne_note = st.text_input(
+                            "Note", value=str(row.get("notes") or ""),
+                            key=f"pb_efnote_{eid}")
                         efs1, efs2, _ = st.columns([1, 1, 4])
                         with efs1:
                             if st.button("💾 Save", key=f"pb_efsv_{eid}",
@@ -933,10 +944,12 @@ elif st.session_state.pb_view == "firm":
                                         conn.execute(
                                             "UPDATE passbook_entries SET "
                                             "entry_date=%s,details=%s,amount=%s,txn_type=%s,"
-                                            "cheque_number=%s,cheque_status=%s,source_id=NULL "
+                                            "cheque_number=%s,cheque_status=%s,"
+                                            "notes=%s,source_id=NULL "
                                             "WHERE entry_id=%s",
                                             (str(ne_date), _det2, round(ne_amt, 2),
-                                             ne_type, _chq2, _chqst2, eid))
+                                             ne_type, _chq2, _chqst2,
+                                             ne_note.strip(), eid))
                                         conn.commit()
                                         st.session_state[f"pb_edit_{eid}"] = False
                                         st.success("Entry updated.")
@@ -1121,6 +1134,7 @@ elif st.session_state.pb_view == "cash":
                                           key="cih_af_type")
                     ca_details = st.text_input("Details (required)", key="cih_af_details")
 
+                ca_note = st.text_input("Note (optional)", key="cih_af_note")
                 cafs1, cafs2, _ = st.columns([1, 1, 4])
                 with cafs1:
                     _cih_save = st.form_submit_button("💾 Save", use_container_width=True)
@@ -1137,10 +1151,10 @@ elif st.session_state.pb_view == "cash":
                     with conn:
                         conn.execute(
                             "INSERT INTO cash_in_hand_entries "
-                            "(entry_date,details,amount,txn_type,source_type) "
-                            "VALUES (%s,%s,%s,%s,%s)",
+                            "(entry_date,details,amount,txn_type,source_type,notes) "
+                            "VALUES (%s,%s,%s,%s,%s,%s)",
                             (str(ca_date), _cdet, round(ca_amount, 2),
-                             ca_type, SRC_MANUAL))
+                             ca_type, SRC_MANUAL, (ca_note or "").strip()))
                     st.session_state.pb_show_cih_add_form = False
                     st.toast("Transaction saved.", icon="✅")
                     clear_passbook_cache()
@@ -1313,8 +1327,14 @@ elif st.session_state.pb_view == "cash":
                     st.markdown(f'<div style="{_CELL};color:#c8bfa8">'
                                 f'{fmt_date(crow["entry_date"])}</div>', unsafe_allow_html=True)
                 with rcols[2]:
+                    _cnote_html = ""
+                    _crow_note  = str(crow.get("notes") or "").strip()
+                    if _crow_note:
+                        _cnote_html = (f'<div style="font-size:0.68rem;color:#5a5448;'
+                                       f'margin-top:1px">{h(_crow_note)}</div>')
                     st.markdown(f'<div style="{_CELL};color:#c8bfa8">'
-                                f'{h(str(crow["details"]))}</div>', unsafe_allow_html=True)
+                                f'{h(str(crow["details"]))}{_cnote_html}</div>',
+                                unsafe_allow_html=True)
                 with rcols[3]:
                     st.markdown(
                         f'<div style="{_CELL};color:{amt_color};'
@@ -1379,6 +1399,9 @@ elif st.session_state.pb_view == "cash":
                             "Type", ["Credit", "Debit"], horizontal=True,
                             index=0 if crow["txn_type"] == "Credit" else 1,
                             key=f"cih_eft_{ceid}")
+                    cne_note = st.text_input(
+                        "Note", value=str(crow.get("notes") or ""),
+                        key=f"cih_efnote_{ceid}")
                     cefs1, cefs2, _ = st.columns([1, 1, 4])
                     with cefs1:
                         if st.button("💾 Save", key=f"cih_efsv_{ceid}",
@@ -1392,10 +1415,12 @@ elif st.session_state.pb_view == "cash":
                                 with conn:
                                     conn.execute(
                                         "UPDATE cash_in_hand_entries "
-                                        "SET entry_date=%s,details=%s,amount=%s,txn_type=%s "
+                                        "SET entry_date=%s,details=%s,amount=%s,"
+                                        "txn_type=%s,notes=%s "
                                         "WHERE entry_id=%s",
                                         (str(cne_date), _cdet2,
-                                         round(cne_amt, 2), cne_type, ceid))
+                                         round(cne_amt, 2), cne_type,
+                                         cne_note.strip(), ceid))
                                 st.session_state[f"cih_edit_{ceid}"] = False
                                 st.success("Entry updated.")
                                 clear_passbook_cache()
