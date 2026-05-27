@@ -2007,13 +2007,16 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                     (SRC_SETTLEMENT_CASH, tid)).fetchone()
                                                 if not _existing and abs(_fs_val) > 0.001:
                                                     _cih_type = "Credit" if _fs_val > 0 else "Debit"
+                                                    _cih_det  = (
+                                                        f"{u_name} via {bname} "
+                                                        f"(Bill: {fmt_date(str(txn['date']))})")
                                                     conn.execute(
                                                         "INSERT INTO cash_in_hand_entries "
                                                         "(entry_date,details,amount,txn_type,"
                                                         " source_type,source_id) "
                                                         "VALUES (%s,%s,%s,%s,%s,%s)",
-                                                        (str(u_date),
-                                                         f"{u_name} — Final Settlement",
+                                                        (str(date.today()),
+                                                         _cih_det,
                                                          abs(_fs_val), _cih_type,
                                                          SRC_SETTLEMENT_CASH, tid))
                                             elif u_status != "Paid" and _old_status == "Paid":
