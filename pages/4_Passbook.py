@@ -18,7 +18,7 @@ from utils.db import (
     SRC_MANUAL, SRC_VENDOR_RTGS,
     SRC_CUST_CHQ_TXN, SRC_CUST_CHQ_PMT,
     SRC_ALLOCATION, SRC_OPENING,
-    SRC_CUSTOMER_CASH, SRC_VENDOR_UB, SRC_CIH_OPENING,
+    SRC_CUSTOMER_CASH, SRC_SETTLEMENT_CASH, SRC_VENDOR_UB, SRC_CIH_OPENING,
     CHQ_PENDING, CHQ_CLEARED,
     TXNS_PER_PAGE,
     get_cached_customer_names,
@@ -121,8 +121,10 @@ def cih_source_badge(source_type: str) -> str:
                             'border:1px solid #3a1860;border-radius:3px;padding:1px 6px">Customer Cash</span>'),
         SRC_VENDOR_UB:     ('<span style="font-size:0.6rem;background:#0d1830;color:#6a9fd4;'
                             'border:1px solid #1a3060;border-radius:3px;padding:1px 6px">Vendor UB</span>'),
-        SRC_CIH_OPENING:   ('<span style="font-size:0.6rem;background:#1e1808;color:#e8c97e;'
-                            'border:1px solid #3a3010;border-radius:3px;padding:1px 6px">Opening</span>'),
+        SRC_CIH_OPENING:     ('<span style="font-size:0.6rem;background:#1e1808;color:#e8c97e;'
+                              'border:1px solid #3a3010;border-radius:3px;padding:1px 6px">Opening</span>'),
+        SRC_SETTLEMENT_CASH: ('<span style="font-size:0.6rem;background:#0d1e10;color:#6ad48a;'
+                              'border:1px solid #1a4022;border-radius:3px;padding:1px 6px">Settlement</span>'),
     }
     return _MAP.get(source_type or SRC_MANUAL, h(source_type or ""))
 
@@ -1308,9 +1310,10 @@ elif st.session_state.pb_view == "cash":
 
             # ── Table rows ───────────────────────────────────
             for _, crow in df_cih_page.iterrows():
-                ceid      = int(crow["entry_id"])
-                src       = str(crow.get("source_type") or SRC_MANUAL)
-                is_manual = (src == SRC_MANUAL)
+                ceid         = int(crow["entry_id"])
+                src          = str(crow.get("source_type") or SRC_MANUAL)
+                is_manual    = (src == SRC_MANUAL)
+                is_settlement = (src == SRC_SETTLEMENT_CASH)
 
                 amt    = float(crow["amount"])
                 bal    = float(crow["balance"])
@@ -1350,7 +1353,7 @@ elif st.session_state.pb_view == "cash":
                                 unsafe_allow_html=True)
 
                 with rcols[6]:
-                    if is_manual:
+                    if is_manual or is_settlement:
                         ac1, ac2 = st.columns(2)
                         with ac1:
                             if st.button("✏️", key=f"cih_ed_{ceid}",
@@ -1375,12 +1378,16 @@ elif st.session_state.pb_view == "cash":
                     unsafe_allow_html=True)
 
                 # ── Inline Edit form ──────────────────────────
-                if is_manual and st.session_state.get(f"cih_edit_{ceid}"):
+                if (is_manual or is_settlement) and st.session_state.get(f"cih_edit_{ceid}"):
                     st.markdown(
                         '<div style="background:#1a1810;border:1px solid #2a2820;'
                         'border-radius:8px;padding:0.8rem 1rem;margin-bottom:0.4rem">',
                         unsafe_allow_html=True)
-                    st.markdown(f"**✏️ Edit Entry #{ceid}**")
+                    _edit_label = f"**✏️ Edit Entry #{ceid}**"
+                    if is_settlement:
+                        _edit_label += (' <span style="font-size:0.72rem;color:#5a5448">'
+                                        '— editing will unlink from source transaction</span>')
+                    st.markdown(_edit_label, unsafe_allow_html=True)
                     cef1, cef2 = st.columns(2)
                     with cef1:
                         cne_date = st.date_input(
@@ -1412,19 +1419,23 @@ elif st.session_state.pb_view == "cash":
                             elif cne_amt <= 0:
                                 st.error("Amount must be > 0.")
                             else:
-                                with conn:
-                                    conn.execute(
-                                        "UPDATE cash_in_hand_entries "
-                                        "SET entry_date=%s,details=%s,amount=%s,"
-                                        "txn_type=%s,notes=%s "
-                                        "WHERE entry_id=%s",
-                                        (str(cne_date), _cdet2,
-                                         round(cne_amt, 2), cne_type,
-                                         cne_note.strip(), ceid))
-                                st.session_state[f"cih_edit_{ceid}"] = False
-                                st.success("Entry updated.")
-                                clear_passbook_cache()
-                                st.rerun()
+                                try:
+                                    with conn:
+                                        conn.execute(
+                                            "UPDATE cash_in_hand_entries "
+                                            "SET entry_date=%s,details=%s,amount=%s,"
+                                            "txn_type=%s,notes=%s,"
+                                            "source_id=NULL,source_type=%s "
+                                            "WHERE entry_id=%s",
+                                            (str(cne_date), _cdet2,
+                                             round(cne_amt, 2), cne_type,
+                                             cne_note.strip(), SRC_MANUAL, ceid))
+                                    st.session_state[f"cih_edit_{ceid}"] = False
+                                    st.success("Entry updated.")
+                                    clear_passbook_cache()
+                                    st.rerun()
+                                except Exception as _e:
+                                    st.error(f"Failed to update entry: {_e}")
                     with cefs2:
                         if st.button("✕ Cancel", key=f"cih_efcx_{ceid}",
                                      use_container_width=True):
@@ -1433,12 +1444,13 @@ elif st.session_state.pb_view == "cash":
                     st.markdown('</div>', unsafe_allow_html=True)
 
                 # ── Delete confirm ────────────────────────────
-                if is_manual and st.session_state.get(f"cih_del_{ceid}"):
+                if (is_manual or is_settlement) and st.session_state.get(f"cih_del_{ceid}"):
+                    _del_note = " (this will not affect the source transaction)" if is_settlement else ""
                     st.markdown(
                         f'<div style="background:#1e0808;border:1px solid #6a1a1a;'
                         f'border-radius:8px;padding:0.5rem 1rem;margin-bottom:0.3rem">'
                         f'<span style="color:#ff8080;font-size:0.82rem">'
-                        f'⚠️ Delete entry #{ceid}%s</span></div>',
+                        f'⚠️ Delete entry #{ceid}{h(_del_note)}</span></div>',
                         unsafe_allow_html=True)
                     cdd1, cdd2, _ = st.columns([0.8, 0.8, 6])
                     with cdd1:
