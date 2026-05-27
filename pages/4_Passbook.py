@@ -933,7 +933,7 @@ elif st.session_state.pb_view == "firm":
                                         conn.execute(
                                             "UPDATE passbook_entries SET "
                                             "entry_date=%s,details=%s,amount=%s,txn_type=%s,"
-                                            "cheque_number=%s,cheque_status=%s "
+                                            "cheque_number=%s,cheque_status=%s,source_id=NULL "
                                             "WHERE entry_id=%s",
                                             (str(ne_date), _det2, round(ne_amt, 2),
                                              ne_type, _chq2, _chqst2, eid))

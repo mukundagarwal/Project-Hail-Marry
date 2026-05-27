@@ -465,7 +465,8 @@ elif st.session_state.page == "ledger":
                                                    key="ifreight")
                     with ic4:
                         icollect = st.selectbox("Collected from",
-                                                list(STOCK_LOCATIONS), key="icollect")
+                                                list(STOCK_LOCATIONS), key="icollect",
+                                                index=list(STOCK_LOCATIONS).index("Shop"))
 
                     fa_col, fb_col = st.columns(2)
                     with fa_col:
@@ -1167,6 +1168,12 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                 "DELETE FROM passbook_entries "
                                                 "WHERE source_type=%s AND source_id=%s",
                                                 (SRC_CUST_CHQ_PMT, pid_p))
+                                        # ── Passbook sync: delete linked UPI / Bank Transfer entry ──
+                                        if p["method"] in ("UPI", "Bank Transfer"):
+                                            conn.execute(
+                                                "DELETE FROM passbook_entries "
+                                                "WHERE source_type=%s AND source_id=%s",
+                                                (SRC_MANUAL, pid_p))
                                         # ── Passbook sync: revert auto-allocated passbook entry ──
                                         if _is_auto_alloc and _auto_alloc_eid:
                                             conn.execute(
@@ -1224,6 +1231,18 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                             if p.get("cheque_date") else ep_date)
                                         ep_chq_date = st.date_input("Cheque Date",
                                             value=_ep_chq_default, key=f"epcd_{tid}_{pid_p}")
+                                    _ep_dep_default = str(p.get("deposit_firm") or FIRM_SP)
+                                    ep_dep_firm = st.radio(
+                                        "Deposit to", list(FIRMS),
+                                        horizontal=True,
+                                        index=0 if _ep_dep_default == FIRM_SP else 1,
+                                        key=f"epdepf_{tid}_{pid_p}")
+                                    ep_dep_account = st.selectbox(
+                                        "Bank Account",
+                                        BANK_ACCOUNTS.get(ep_dep_firm, (DEFAULT_BANK_ACCOUNT,)),
+                                        index=0, key=f"epdepacct_{tid}_{pid_p}")
+                                elif ep_method in ("UPI", "Bank Transfer"):
+                                    ep_chq_no, ep_chq_date = None, None
                                     _ep_dep_default = str(p.get("deposit_firm") or FIRM_SP)
                                     ep_dep_firm = st.radio(
                                         "Deposit to", list(FIRMS),
@@ -1342,6 +1361,34 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                                  f"Cash from {bname} (Txn: {fmt_date(str(txn['date']))})",
                                                                  round(ep_amt, 2), 'Credit',
                                                                  SRC_CUSTOMER_CASH, pid_p))
+                                                        # ── Passbook sync: UPI / Bank Transfer ─────────────
+                                                        _old_is_bank = _old_m in ("UPI", "Bank Transfer")
+                                                        _new_is_bank = ep_method in ("UPI", "Bank Transfer")
+                                                        if _old_is_bank and _new_is_bank:
+                                                            conn.execute(
+                                                                "UPDATE passbook_entries "
+                                                                "SET firm=%s,entry_date=%s,amount=%s,"
+                                                                "bank_account=%s "
+                                                                "WHERE source_type=%s AND source_id=%s",
+                                                                (ep_dep_firm, str(ep_date),
+                                                                 round(ep_amt, 2),
+                                                                 ep_dep_account or DEFAULT_BANK_ACCOUNT,
+                                                                 SRC_MANUAL, pid_p))
+                                                        elif _old_is_bank and not _new_is_bank:
+                                                            conn.execute(
+                                                                "DELETE FROM passbook_entries "
+                                                                "WHERE source_type=%s AND source_id=%s",
+                                                                (SRC_MANUAL, pid_p))
+                                                        elif not _old_is_bank and _new_is_bank and ep_dep_firm:
+                                                            conn.execute(
+                                                                "INSERT INTO passbook_entries "
+                                                                "(firm,entry_date,details,amount,txn_type,"
+                                                                " source_type,source_id,bank_account) "
+                                                                "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s)",
+                                                                (ep_dep_firm, str(ep_date),
+                                                                 _det3, round(ep_amt, 2),
+                                                                 SRC_MANUAL, pid_p,
+                                                                 ep_dep_account or DEFAULT_BANK_ACCOUNT))
                                                     st.session_state[edit_pmt_key] = False
                                                     st.success(f"Payment #{pid_p} updated. Please recalculate.")
                                                     clear_passbook_cache()
@@ -1387,6 +1434,15 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                             with pcc2:
                                 p_chq_date = st.date_input("Cheque Date", value=p_date,
                                                            key=f"pchqd_{tid}")
+                            p_dep_firm = st.radio(
+                                "Deposit to", list(FIRMS),
+                                horizontal=True, index=0, key=f"pdepf_{tid}")
+                            p_dep_account = st.selectbox(
+                                "Bank Account",
+                                BANK_ACCOUNTS.get(p_dep_firm, (DEFAULT_BANK_ACCOUNT,)),
+                                index=0, key=f"pdepacct_{tid}")
+                        elif p_method in ("UPI", "Bank Transfer"):
+                            p_chq_no, p_chq_date = None, None
                             p_dep_firm = st.radio(
                                 "Deposit to", list(FIRMS),
                                 horizontal=True, index=0, key=f"pdepf_{tid}")
@@ -1482,6 +1538,18 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                                          f"Cash from {bname} (Txn: {fmt_date(str(txn['date']))})",
                                                          round(p_amt, 2), 'Credit',
                                                          SRC_CUSTOMER_CASH, new_pmt_id))
+                                                # ── Passbook sync: UPI / Bank Transfer ─────────────
+                                                elif p_method in ("UPI", "Bank Transfer") and p_dep_firm:
+                                                    conn.execute(
+                                                        "INSERT INTO passbook_entries "
+                                                        "(firm,entry_date,details,amount,txn_type,"
+                                                        " source_type,source_id,bank_account) "
+                                                        "VALUES (%s,%s,%s,%s,'Credit',%s,%s,%s)",
+                                                        (p_dep_firm, str(p_date),
+                                                         f"{txn['customer_name']} (via {bname})",
+                                                         round(p_amt, 2),
+                                                         SRC_MANUAL, new_pmt_id,
+                                                         p_dep_account or DEFAULT_BANK_ACCOUNT))
                                             st.session_state[log_pmt_key] = False
                                             st.success(f"Payment of {fmt_inr(p_amt)} saved!")
                                             clear_passbook_cache()
@@ -1532,6 +1600,14 @@ tfoot tr td{{font-weight:700;background:#e8e8e8;border-top:2px solid #333;font-s
                                         "  SELECT payment_id FROM payments "
                                         "  WHERE transaction_id=%s AND method='Cash'"
                                         ")", (SRC_CUSTOMER_CASH, tid))
+                                    # Remove passbook entries for UPI / Bank Transfer payments
+                                    conn.execute(
+                                        "DELETE FROM passbook_entries "
+                                        "WHERE source_type=%s AND source_id IN ("
+                                        "  SELECT payment_id FROM payments "
+                                        "  WHERE transaction_id=%s "
+                                        "  AND method IN ('UPI', 'Bank Transfer')"
+                                        ")", (SRC_MANUAL, tid))
                                     conn.execute("DELETE FROM payments WHERE transaction_id=%s", (tid,))
                                     conn.execute("DELETE FROM transaction_items WHERE transaction_id=%s", (tid,))
                                     conn.execute("DELETE FROM customer_transactions WHERE transaction_id=%s", (tid,))
