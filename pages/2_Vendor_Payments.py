@@ -712,7 +712,7 @@ def _delete_confirm(entry_row, conn):
         f'<div style="background:#1e0808;border:1px solid #6a1a1a;border-radius:8px;'
         f'padding:0.6rem 1rem;margin:0.2rem 0">'
         f'<span style="color:#ff8080;font-size:0.83rem">'
-        f'⚠️ Delete {ek} #{entry_id}%s{note}</span></div>',
+        f'⚠️ Delete {ek} #{entry_id}{note}</span></div>',
         unsafe_allow_html=True)
     dc1, dc2, _ = st.columns([0.9, 0.9, 6])
     with dc1:
@@ -720,9 +720,9 @@ def _delete_confirm(entry_row, conn):
             with conn:
                 if ek == "Bill":
                     _del_gid  = entry_row.get("good_id")
-                    _del_bags = int(entry_row["bags"])
-                    _del_kg   = float(entry_row["quantity_kg"])
-                    if _del_gid is not None:
+                    _del_bags = int(entry_row.get("bags") or 0)
+                    _del_kg   = float(entry_row.get("quantity_kg") or 0)
+                    if pd.notna(_del_gid) and _del_gid is not None:
                         # MODE A: reverse identified stock
                         warn = reverse_bill_stock(conn, int(_del_gid), _del_bags, _del_kg)
                         if warn:
