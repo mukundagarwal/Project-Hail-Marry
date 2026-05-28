@@ -412,7 +412,7 @@ def _edit_form(entry_row, conn):
             f"{_pd['good_name']}: {_pd['preview_bags']} bags / "
             f"{_pd['preview_kg']:.1f} kg. "
             f"This usually means goods were sold after the bill was recorded. "
-            f"Save anyway%s")
+            f"Save anyway?")
         _sa1, _sa2, _ = st.columns([1.2, 1, 5.8])
         with _sa1:
             if st.button("💾 Save Anyway", key=f"vp_sa_{entry_id}",
@@ -423,7 +423,8 @@ def _edit_form(entry_row, conn):
                 with conn:
                     warn = reverse_bill_stock(
                         conn, _gid_old,
-                        int(entry_row["bags"]), float(entry_row["quantity_kg"]))
+                        int(entry_row.get("bags") or 0),
+                        float(entry_row.get("quantity_kg") or 0))
                     _sa_mode = _p.get("new_mode", "A")
                     if _sa_mode == "A":
                         conn.execute(
@@ -570,10 +571,11 @@ def _edit_form(entry_row, conn):
                 st.error("Bags and Kg must be > 0 when a specific good is selected.")
             else:
                 if ek == "Bill":
-                    _old_good_id_val = entry_row.get("good_id")
-                    _old_bags        = int(entry_row["bags"])
-                    _old_kg          = float(entry_row["quantity_kg"])
-                    _old_particulars = str(entry_row["particulars"])
+                    _old_good_id_raw  = entry_row.get("good_id")
+                    _old_good_id_val  = None if (not pd.notna(_old_good_id_raw)) else _old_good_id_raw
+                    _old_bags         = int(entry_row.get("bags") or 0)
+                    _old_kg           = float(entry_row.get("quantity_kg") or 0)
+                    _old_particulars  = str(entry_row["particulars"])
 
                     # Negative-stock confirmation only when old bill had an identified good
                     _do_confirm = False
