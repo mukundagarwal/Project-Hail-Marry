@@ -1285,10 +1285,17 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
             JOIN stock_categories sc ON sg.category_id = sc.category_id
             WHERE sl.good_id = %s AND sl.location = %s AND sl.batch_label = ''
         """, (gid, loc)).fetchone()
-        _cs_b_bags = float(_cs_row["bags"] or 0) if _cs_row else 0
-        _cs_b_kg   = float(_cs_row["quantity_kg"] or 0) if _cs_row else 0.0
-        _cs_cat    = _cs_row["category_name"] if _cs_row else ""
-        _cs_good   = _cs_row["good_name"] if _cs_row else ""
+
+        if not _cs_row:
+            warnings.append(
+                f"⚠ No stock record found for '{it['goods']}' at {loc} "
+                "— stock NOT updated. Check Stock Register.")
+            continue
+
+        _cs_b_bags = float(_cs_row["bags"] or 0)
+        _cs_b_kg   = float(_cs_row["quantity_kg"] or 0)
+        _cs_cat    = _cs_row["category_name"]
+        _cs_good   = _cs_row["good_name"]
 
         conn.execute(
             "UPDATE stock_levels SET bags=bags-%s, quantity_kg=quantity_kg-%s "

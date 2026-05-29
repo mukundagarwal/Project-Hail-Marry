@@ -375,6 +375,7 @@ elif st.session_state.page == "ledger":
                     st.session_state["inp_cust"] = ""
                     for _k in ["ibags", "iqty", "irate", "ibr", "ifreight"]:
                         st.session_state[_k] = ""
+                    st.session_state.pop("icollect", None)  # reset to "Shop" default
 
                 st.markdown("##### New Transaction")
                 new_cust = st.text_input("Customer Name",
@@ -617,7 +618,7 @@ elif st.session_state.page == "ledger":
                                             st.session_state.bill_pstatus     = "Pending"
                                             st.session_state["_reset_item_form"] = True
                                             for _k in ["bill_ig_sel", "_prev_bill_ig",
-                                                       "_restore_bag_rate",
+                                                       "_restore_bag_rate", "icollect",
                                                        "inp_cust", "inp_date", "inp_pst"]:
                                                 st.session_state.pop(_k, None)
                                             for _sw in stock_warns:
@@ -633,7 +634,7 @@ elif st.session_state.page == "ledger":
                             st.session_state.bill_pstatus     = "Pending"
                             st.session_state["_reset_item_form"] = True
                             for _k in ["bill_ig_sel", "_prev_bill_ig",
-                                       "_restore_bag_rate",
+                                       "_restore_bag_rate", "icollect",
                                        "inp_cust", "inp_date", "inp_pst"]:
                                 st.session_state.pop(_k, None)
                             st.rerun()
