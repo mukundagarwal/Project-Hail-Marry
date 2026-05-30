@@ -288,12 +288,8 @@ def get_cached_home_stats(today_iso: str) -> dict:
                 (SELECT COUNT(*) FROM brokers) AS n_b,
                 COUNT(*) AS n_t,
                 COALESCE(SUM(ct.total_amount), 0) AS rev,
-                COALESCE(SUM(
-                    CASE WHEN ct.final_settlement IS NOT NULL
-                         THEN ct.final_settlement
-                         ELSE ct.total_amount - COALESCE(p.paid, 0)
-                    END
-                ) FILTER (WHERE ct.payment_status IN ('Pending','Partial')), 0) AS pend
+                COALESCE(SUM(ct.total_amount - COALESCE(p.paid, 0))
+                    FILTER (WHERE ct.payment_status IN ('Pending','Partial')), 0) AS pend
             FROM customer_transactions ct
             LEFT JOIN (
                 SELECT transaction_id, SUM(amount) AS paid
@@ -354,14 +350,11 @@ def get_cached_ledger_stats(broker_id: int, today_iso: str) -> dict:
         row = conn.execute("""
             SELECT COUNT(*) cnt,
                 COALESCE(SUM(ct.total_amount),0) total,
-                COALESCE(SUM(
-                    CASE WHEN ct.final_settlement IS NOT NULL
-                         THEN ct.final_settlement
-                         ELSE ct.total_amount - COALESCE(p.paid, 0)
-                    END
-                ) FILTER (WHERE ct.payment_status IN ('Pending','Partial')), 0) AS pending,
+                COALESCE(SUM(ct.total_amount - COALESCE(p.paid, 0))
+                    FILTER (WHERE ct.payment_status IN ('Pending','Partial')), 0) AS pending,
                 COALESCE(SUM(COALESCE(p.paid, 0)), 0) AS paid,
-                COALESCE(SUM(CASE WHEN ct.final_settlement IS NOT NULL THEN ct.final_settlement ELSE 0 END),0) settled,
+                COALESCE(SUM(CASE WHEN ct.payment_status='Paid' AND ct.final_settlement IS NOT NULL
+                                  THEN ct.final_settlement ELSE 0 END),0) settled,
                 COALESCE(SUM(CASE WHEN ct.calc_status='Pending' THEN 1 ELSE 0 END),0) uncalc,
                 COALESCE(SUM(CASE WHEN ct.payment_status IN ('Pending','Partial')
                     AND (%s::date - ct.date::date) > 60
