@@ -673,12 +673,11 @@ elif st.session_state.stock_page == "category":
                         hist_rows_html = ""
                         for _, hr in df_hist.iterrows():
                             try:
-                                _dt_parts = str(hr["recorded_at"]).split(" ")
-                                _d, _t = _dt_parts[0], _dt_parts[1][:5]
+                                _d = str(hr["recorded_at"]).split(" ")[0]
                                 _y, _m, _day = _d.split("-")
-                                _fmt_dt = f"{_day}/{_m}/{_y} {_t}"
+                                _fmt_dt = f"{_day}/{_m}/{_y}"
                             except Exception:
-                                _fmt_dt = str(hr["recorded_at"])
+                                _fmt_dt = str(hr["recorded_at"])[:10]
                             _ct    = str(hr["change_type"])
                             _bc    = _BADGE_COLORS.get(_ct, "#8a8070")
                             _badge = (
@@ -715,6 +714,17 @@ elif st.session_state.stock_page == "category":
                                     f'<span style="color:#ff5555;font-weight:600">'
                                     f'{_kc_val:.2f}</span>'
                                 )
+                            _bal_bags = float(hr["bags_after"])
+                            _bal_kg   = float(hr["kg_after"])
+                            _bal_color = "#ff5555" if _bal_bags < 0 else "#8dd87a" if _bal_bags > 0 else "#5a5448"
+                            _bal_cell = (
+                                f'<span style="color:{_bal_color};font-weight:600">'
+                                f'{_bal_bags:.2f}</span>'
+                                f'<span style="color:#3a3628;font-size:0.68rem"> bags</span>'
+                                f'<br><span style="color:{_bal_color}">'
+                                f'{_bal_kg:.2f}</span>'
+                                f'<span style="color:#3a3628;font-size:0.68rem"> kg</span>'
+                            )
                             hist_rows_html += (
                                 f'<tr>'
                                 f'<td style="padding:4px 6px;font-size:0.72rem;'
@@ -726,6 +736,8 @@ elif st.session_state.stock_page == "category":
                                 f'{_bags_chg}</td>'
                                 f'<td style="padding:4px 6px;text-align:right">'
                                 f'{_kg_chg}</td>'
+                                f'<td style="padding:4px 6px;text-align:right;'
+                                f'line-height:1.4">{_bal_cell}</td>'
                                 f'<td style="padding:4px 6px;font-size:0.72rem;'
                                 f'color:#5a5448">{h(str(hr["source"]))}</td>'
                                 f'</tr>'
@@ -735,7 +747,7 @@ elif st.session_state.stock_page == "category":
                             f'<thead><tr style="border-bottom:1px solid #252318">'
                             f'<th style="text-align:left;padding:3px 6px;font-size:0.62rem;'
                             f'color:#3a3628;text-transform:uppercase;letter-spacing:0.1em">'
-                            f'Date &amp; Time</th>'
+                            f'Date</th>'
                             f'<th style="text-align:left;padding:3px 6px;font-size:0.62rem;'
                             f'color:#3a3628;text-transform:uppercase;letter-spacing:0.1em">'
                             f'Good</th>'
@@ -748,6 +760,9 @@ elif st.session_state.stock_page == "category":
                             f'<th style="text-align:right;padding:3px 6px;font-size:0.62rem;'
                             f'color:#3a3628;text-transform:uppercase;letter-spacing:0.1em">'
                             f'Kg (&plusmn;)</th>'
+                            f'<th style="text-align:right;padding:3px 6px;font-size:0.62rem;'
+                            f'color:#3a3628;text-transform:uppercase;letter-spacing:0.1em">'
+                            f'Balance After</th>'
                             f'<th style="text-align:left;padding:3px 6px;font-size:0.62rem;'
                             f'color:#3a3628;text-transform:uppercase;letter-spacing:0.1em">'
                             f'Source</th>'
