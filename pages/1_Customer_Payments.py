@@ -329,8 +329,8 @@ elif st.session_state.page == "ledger":
                      <div style="font-size:1.1rem;font-weight:600;color:#e8c97e">{fmt_inr(stats.get('total', 0))}</div></div>
                 <div><div style="font-size:.65rem;color:#3a3628;text-transform:uppercase;letter-spacing:.1em">Collected</div>
                      <div style="font-size:1.1rem;font-weight:600;color:#6dbf67">{fmt_inr(stats.get('paid', 0))}</div></div>
-                <div><div style="font-size:.65rem;color:#3a3628;text-transform:uppercase;letter-spacing:.1em">Pending</div>
-                     <div style="font-size:1.1rem;font-weight:600;color:#d4864a">{fmt_inr(stats.get('pending', 0))}</div></div>
+                <div><div style="font-size:.65rem;color:#3a3628;text-transform:uppercase;letter-spacing:.1em">Outstanding</div>
+                     <div style="font-size:1.1rem;font-weight:600;color:{'#6dbf67' if stats.get('pending', 0) < 0 else '#d4864a'}">{fmt_inr(stats.get('pending', 0))}</div></div>
                 <div><div style="font-size:.65rem;color:#3a3628;text-transform:uppercase;letter-spacing:.1em">Net Settlement</div>
                      <div style="font-size:1.1rem;font-weight:600;color:#8dd87a">{fmt_inr(stats.get('settled', 0))}</div></div>
             </div>
