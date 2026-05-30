@@ -289,9 +289,10 @@ def get_cached_home_stats(today_iso: str) -> dict:
                 COUNT(*) AS n_t,
                 COALESCE(SUM(ct.total_amount), 0) AS rev,
                 COALESCE(SUM(
-                    COALESCE(CASE WHEN ct.final_settlement IS NOT NULL
-                                  THEN ct.final_settlement ELSE ct.total_amount END, 0)
-                    - COALESCE(p.paid, 0)
+                    CASE WHEN ct.final_settlement IS NOT NULL
+                         THEN ct.final_settlement
+                         ELSE ct.total_amount - COALESCE(p.paid, 0)
+                    END
                 ) FILTER (WHERE ct.payment_status IN ('Pending','Partial')), 0) AS pend
             FROM customer_transactions ct
             LEFT JOIN (
@@ -354,9 +355,10 @@ def get_cached_ledger_stats(broker_id: int, today_iso: str) -> dict:
             SELECT COUNT(*) cnt,
                 COALESCE(SUM(ct.total_amount),0) total,
                 COALESCE(SUM(
-                    COALESCE(CASE WHEN ct.final_settlement IS NOT NULL
-                                  THEN ct.final_settlement ELSE ct.total_amount END, 0)
-                    - COALESCE(p.paid, 0)
+                    CASE WHEN ct.final_settlement IS NOT NULL
+                         THEN ct.final_settlement
+                         ELSE ct.total_amount - COALESCE(p.paid, 0)
+                    END
                 ) FILTER (WHERE ct.payment_status IN ('Pending','Partial')), 0) AS pending,
                 COALESCE(SUM(COALESCE(p.paid, 0)), 0) AS paid,
                 COALESCE(SUM(CASE WHEN ct.final_settlement IS NOT NULL THEN ct.final_settlement ELSE 0 END),0) settled,
