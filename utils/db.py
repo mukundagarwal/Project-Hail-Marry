@@ -288,8 +288,11 @@ def get_cached_home_stats(today_iso: str) -> dict:
                 (SELECT COUNT(*) FROM brokers) AS n_b,
                 COUNT(*) AS n_t,
                 COALESCE(SUM(ct.total_amount), 0) AS rev,
-                COALESCE(SUM(ct.total_amount - COALESCE(p.paid, 0))
-                    FILTER (WHERE ct.payment_status IN ('Pending','Partial')), 0) AS pend
+                COALESCE(SUM(
+                    COALESCE(CASE WHEN ct.final_settlement IS NOT NULL
+                                  THEN ct.final_settlement ELSE ct.total_amount END, 0)
+                    - COALESCE(p.paid, 0)
+                ), 0) AS pend
             FROM customer_transactions ct
             LEFT JOIN (
                 SELECT transaction_id, SUM(amount) AS paid
