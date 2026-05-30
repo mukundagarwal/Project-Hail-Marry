@@ -1249,11 +1249,12 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
     Does NOT commit — caller is responsible.
     """
     _VALID_LOCS = {"Transport", "Shop", "Anandpuri", "Cold"}
+    ph = _db_ph(conn)
     warnings = []
 
     for it in bill_items:
         good_row = conn.execute(
-            "SELECT good_id FROM stock_goods WHERE good_name=%s",
+            f"SELECT good_id FROM stock_goods WHERE good_name={ph}",
             (it["goods"],)).fetchone()
 
         if not good_row:
@@ -1277,14 +1278,14 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
         bags_sold = int(it["bags"])
         kg_sold   = float(it["qty"])
 
-        _cs_row = conn.execute("""
-            SELECT sl.bags, sl.quantity_kg,
-                   sg.good_name, sc.category_name
-            FROM stock_levels sl
-            JOIN stock_goods sg ON sl.good_id = sg.good_id
-            JOIN stock_categories sc ON sg.category_id = sc.category_id
-            WHERE sl.good_id = %s AND sl.location = %s AND sl.batch_label = ''
-        """, (gid, loc)).fetchone()
+        _cs_row = conn.execute(
+            f"SELECT sl.bags, sl.quantity_kg,"
+            f"       sg.good_name, sc.category_name"
+            f"  FROM stock_levels sl"
+            f"  JOIN stock_goods sg ON sl.good_id = sg.good_id"
+            f"  JOIN stock_categories sc ON sg.category_id = sc.category_id"
+            f" WHERE sl.good_id = {ph} AND sl.location = {ph} AND sl.batch_label = ''",
+            (gid, loc)).fetchone()
 
         if not _cs_row:
             warnings.append(
@@ -1298,14 +1299,14 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
         _cs_good   = _cs_row["good_name"]
 
         conn.execute(
-            "UPDATE stock_levels SET bags=bags-%s, quantity_kg=quantity_kg-%s "
-            "WHERE good_id=%s AND location=%s AND batch_label=''",
+            f"UPDATE stock_levels SET bags=bags-{ph}, quantity_kg=quantity_kg-{ph} "
+            f"WHERE good_id={ph} AND location={ph} AND batch_label=''",
             (bags_sold, kg_sold, gid, loc))
 
         conn.execute(
-            "INSERT INTO stock_transfers "
-            "(transfer_date, good_id, from_location, to_location, bags_moved, kg_moved, note) "
-            "VALUES (%s, %s, %s, 'Sold', %s, %s, %s)",
+            f"INSERT INTO stock_transfers "
+            f"(transfer_date, good_id, from_location, to_location, bags_moved, kg_moved, note) "
+            f"VALUES ({ph}, {ph}, {ph}, 'Sold', {ph}, {ph}, {ph})",
             (str(sale_date), gid, loc, bags_sold, kg_sold,
              f"Bill sale — {customer_name}"))
 
@@ -1323,8 +1324,8 @@ def deduct_stock_for_sale(conn, bill_items: list, sale_date, customer_name: str)
                 "stock_history log failed: %s", _e)
 
         updated = conn.execute(
-            "SELECT bags, quantity_kg FROM stock_levels "
-            "WHERE good_id=%s AND location=%s AND batch_label=''", (gid, loc)).fetchone()
+            f"SELECT bags, quantity_kg FROM stock_levels "
+            f"WHERE good_id={ph} AND location={ph} AND batch_label=''", (gid, loc)).fetchone()
         if updated and (updated["bags"] < 0 or updated["quantity_kg"] < 0):
             warnings.append(
                 f"⚠ {it['goods']} at {loc} is now below zero "
