@@ -350,7 +350,8 @@ def get_cached_ledger_stats(broker_id: int, today_iso: str) -> dict:
         row = conn.execute("""
             SELECT COUNT(*) cnt,
                 COALESCE(SUM(ct.total_amount),0) total,
-                COALESCE(SUM(CASE WHEN ct.payment_status='Pending' THEN ct.total_amount ELSE 0 END),0) pending,
+                COALESCE(SUM(ct.total_amount - COALESCE(p.paid, 0))
+                    FILTER (WHERE ct.payment_status IN ('Pending','Partial')), 0) AS pending,
                 COALESCE(SUM(CASE WHEN ct.payment_status='Paid' THEN ct.total_amount ELSE 0 END),0) paid,
                 COALESCE(SUM(CASE WHEN ct.final_settlement IS NOT NULL THEN ct.final_settlement ELSE 0 END),0) settled,
                 COALESCE(SUM(CASE WHEN ct.calc_status='Pending' THEN 1 ELSE 0 END),0) uncalc,
