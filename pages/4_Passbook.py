@@ -682,7 +682,7 @@ elif st.session_state.pb_view == "firm":
                 # detaches them into a Manual entry (see the edit form below).
                 with rcols[8]:
                     _can_edit   = is_manual or is_alloc or is_vendor_rtgs
-                    _can_delete = is_manual or is_alloc
+                    _can_delete = is_manual or is_alloc or is_vendor_rtgs
                     if _can_edit:
                         _acols = st.columns(2) if _can_delete else st.columns(1)
                         with _acols[0]:
@@ -1031,8 +1031,15 @@ elif st.session_state.pb_view == "firm":
                     st.markdown('</div>', unsafe_allow_html=True)
 
                 # ── Delete confirm ────────────────────────────
-                if (is_manual or is_alloc) and st.session_state.get(f"pb_del_{eid}"):
-                    _del_note = " (linked payment will also be deleted)" if is_alloc else ""
+                # Vendor-RTGS rows delete locally only — the vendor payment in
+                # the Vendor ledger is left untouched (no cascade).
+                if (is_manual or is_alloc or is_vendor_rtgs) and st.session_state.get(f"pb_del_{eid}"):
+                    if is_alloc:
+                        _del_note = " (linked payment will also be deleted)"
+                    elif is_vendor_rtgs:
+                        _del_note = " (the vendor payment will not be affected)"
+                    else:
+                        _del_note = ""
                     st.markdown(
                         f'<div style="background:#1e0808;border:1px solid #6a1a1a;'
                         f'border-radius:8px;padding:0.5rem 1rem;margin-bottom:0.3rem">'
@@ -1418,7 +1425,7 @@ elif st.session_state.pb_view == "cash":
 
                 with rcols[6]:
                     _can_edit   = is_manual or is_settlement or is_vendor_ub
-                    _can_delete = is_manual or is_settlement
+                    _can_delete = is_manual or is_settlement or is_vendor_ub
                     if _can_edit:
                         _acols = st.columns(2) if _can_delete else st.columns(1)
                         with _acols[0]:
@@ -1569,8 +1576,15 @@ elif st.session_state.pb_view == "cash":
                     st.markdown('</div>', unsafe_allow_html=True)
 
                 # ── Delete confirm ────────────────────────────
-                if (is_manual or is_settlement) and st.session_state.get(f"cih_del_{ceid}"):
-                    _del_note = " (this will not affect the source transaction)" if is_settlement else ""
+                # Vendor-UB rows delete locally only — the vendor payment in
+                # the Vendor ledger is left untouched (no cascade).
+                if (is_manual or is_settlement or is_vendor_ub) and st.session_state.get(f"cih_del_{ceid}"):
+                    if is_settlement:
+                        _del_note = " (this will not affect the source transaction)"
+                    elif is_vendor_ub:
+                        _del_note = " (the vendor payment will not be affected)"
+                    else:
+                        _del_note = ""
                     st.markdown(
                         f'<div style="background:#1e0808;border:1px solid #6a1a1a;'
                         f'border-radius:8px;padding:0.5rem 1rem;margin-bottom:0.3rem">'
