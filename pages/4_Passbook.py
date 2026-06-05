@@ -581,6 +581,7 @@ elif st.session_state.pb_view == "firm":
                 src        = str(row.get("source_type") or SRC_MANUAL)
                 is_manual  = (src == SRC_MANUAL)
                 is_alloc   = (src == SRC_ALLOCATION)
+                is_vendor_rtgs = (src == SRC_VENDOR_RTGS)
                 # Suspense: Manual Credit with details='Suspense'
                 is_suspense = (is_manual
                                and str(row.get("txn_type", "")) == "Credit"
@@ -676,11 +677,15 @@ elif st.session_state.pb_view == "firm":
                     st.markdown(f'<div style="{_CELL}">{source_badge(src)}</div>',
                                 unsafe_allow_html=True)
 
-                # Actions: Edit + Delete for manual/alloc entries
+                # Actions: Edit for manual/alloc/vendor-RTGS; Delete only for
+                # manual/alloc. Vendor-RTGS rows are edit-only — the first edit
+                # detaches them into a Manual entry (see the edit form below).
                 with rcols[8]:
-                    if is_manual or is_alloc:
-                        ac1, ac2 = st.columns(2)
-                        with ac1:
+                    _can_edit   = is_manual or is_alloc or is_vendor_rtgs
+                    _can_delete = is_manual or is_alloc
+                    if _can_edit:
+                        _acols = st.columns(2) if _can_delete else st.columns(1)
+                        with _acols[0]:
                             if st.button("✏️", key=f"pb_ed_{eid}",
                                          use_container_width=True):
                                 for _k2 in [x for x in st.session_state
@@ -690,13 +695,14 @@ elif st.session_state.pb_view == "firm":
                                     not st.session_state.get(f"pb_edit_{eid}", False)
                                 st.session_state[f"pb_del_{eid}"]  = False
                                 st.rerun()
-                        with ac2:
-                            if st.button("🗑", key=f"pb_dl_{eid}",
-                                         use_container_width=True):
-                                st.session_state[f"pb_del_{eid}"] = \
-                                    not st.session_state.get(f"pb_del_{eid}", False)
-                                st.session_state[f"pb_edit_{eid}"] = False
-                                st.rerun()
+                        if _can_delete:
+                            with _acols[1]:
+                                if st.button("🗑", key=f"pb_dl_{eid}",
+                                             use_container_width=True):
+                                    st.session_state[f"pb_del_{eid}"] = \
+                                        not st.session_state.get(f"pb_del_{eid}", False)
+                                    st.session_state[f"pb_edit_{eid}"] = False
+                                    st.rerun()
 
                 st.markdown(
                     '<div style="border-bottom:1px solid #181610;margin-bottom:1px"></div>',
@@ -965,6 +971,63 @@ elif st.session_state.pb_view == "firm":
                                          use_container_width=True):
                                 st.session_state[f"pb_edit_{eid}"] = False; st.rerun()
 
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                # ── Inline Edit form — Vendor RTGS payment (detach on save) ──
+                # Editing breaks the link to the vendor ledger: the row is
+                # converted to a plain Manual entry and the vendor payment is
+                # left untouched. Date + amount only; vendor name is read-only.
+                if is_vendor_rtgs and st.session_state.get(f"pb_edit_{eid}"):
+                    st.markdown(
+                        '<div style="background:#1a1810;border:1px solid #2a2820;'
+                        'border-radius:8px;padding:0.8rem 1rem;margin-bottom:0.4rem">',
+                        unsafe_allow_html=True)
+                    st.markdown(
+                        f"**✏️ Edit Vendor Payment #{eid}** "
+                        f'<span style="font-size:0.72rem;color:#d4864a">'
+                        f'— saving unlinks this from the Vendor ledger</span>',
+                        unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div style="font-size:0.78rem;color:#8a8070;'
+                        f'margin-bottom:0.5rem">Vendor: '
+                        f'<b>{h(str(row["details"] or ""))}</b></div>',
+                        unsafe_allow_html=True)
+                    vef1, vef2 = st.columns(2)
+                    with vef1:
+                        vne_date = st.date_input(
+                            "Date",
+                            value=date.fromisoformat(str(row["entry_date"])),
+                            key=f"pb_efd_{eid}")
+                    with vef2:
+                        vne_amt = st.number_input(
+                            "Amount (₹)", min_value=0.01,
+                            value=float(row["amount"]), step=100.0,
+                            format="%.2f", key=f"pb_efa_{eid}")
+                    vefs1, vefs2, _ = st.columns([1, 1, 4])
+                    with vefs1:
+                        if st.button("💾 Save", key=f"pb_efsv_{eid}",
+                                     use_container_width=True):
+                            try:
+                                conn.execute(
+                                    "UPDATE passbook_entries SET "
+                                    "entry_date=%s,amount=%s,"
+                                    "source_type=%s,source_id=NULL "
+                                    "WHERE entry_id=%s",
+                                    (str(vne_date), round(vne_amt, 2),
+                                     SRC_MANUAL, eid))
+                                conn.commit()
+                                st.session_state[f"pb_edit_{eid}"] = False
+                                st.success("Entry updated and unlinked from the "
+                                           "vendor payment.")
+                                clear_passbook_cache()
+                                st.rerun()
+                            except Exception as e:
+                                conn.rollback()
+                                st.error(f"Failed to update entry: {e}")
+                    with vefs2:
+                        if st.button("✕ Cancel", key=f"pb_efcx_{eid}",
+                                     use_container_width=True):
+                            st.session_state[f"pb_edit_{eid}"] = False; st.rerun()
                     st.markdown('</div>', unsafe_allow_html=True)
 
                 # ── Delete confirm ────────────────────────────
@@ -1314,6 +1377,7 @@ elif st.session_state.pb_view == "cash":
                 src          = str(crow.get("source_type") or SRC_MANUAL)
                 is_manual    = (src == SRC_MANUAL)
                 is_settlement = (src == SRC_SETTLEMENT_CASH)
+                is_vendor_ub  = (src == SRC_VENDOR_UB)
 
                 amt    = float(crow["amount"])
                 bal    = float(crow["balance"])
@@ -1353,9 +1417,11 @@ elif st.session_state.pb_view == "cash":
                                 unsafe_allow_html=True)
 
                 with rcols[6]:
-                    if is_manual or is_settlement:
-                        ac1, ac2 = st.columns(2)
-                        with ac1:
+                    _can_edit   = is_manual or is_settlement or is_vendor_ub
+                    _can_delete = is_manual or is_settlement
+                    if _can_edit:
+                        _acols = st.columns(2) if _can_delete else st.columns(1)
+                        with _acols[0]:
                             if st.button("✏️", key=f"cih_ed_{ceid}",
                                          use_container_width=True):
                                 for _k2 in [x for x in st.session_state
@@ -1365,13 +1431,14 @@ elif st.session_state.pb_view == "cash":
                                     not st.session_state.get(f"cih_edit_{ceid}", False)
                                 st.session_state[f"cih_del_{ceid}"] = False
                                 st.rerun()
-                        with ac2:
-                            if st.button("🗑", key=f"cih_dl_{ceid}",
-                                         use_container_width=True):
-                                st.session_state[f"cih_del_{ceid}"] = \
-                                    not st.session_state.get(f"cih_del_{ceid}", False)
-                                st.session_state[f"cih_edit_{ceid}"] = False
-                                st.rerun()
+                        if _can_delete:
+                            with _acols[1]:
+                                if st.button("🗑", key=f"cih_dl_{ceid}",
+                                             use_container_width=True):
+                                    st.session_state[f"cih_del_{ceid}"] = \
+                                        not st.session_state.get(f"cih_del_{ceid}", False)
+                                    st.session_state[f"cih_edit_{ceid}"] = False
+                                    st.rerun()
 
                 st.markdown(
                     '<div style="border-bottom:1px solid #181610;margin-bottom:1px"></div>',
@@ -1437,6 +1504,64 @@ elif st.session_state.pb_view == "cash":
                                 except Exception as _e:
                                     st.error(f"Failed to update entry: {_e}")
                     with cefs2:
+                        if st.button("✕ Cancel", key=f"cih_efcx_{ceid}",
+                                     use_container_width=True):
+                            st.session_state[f"cih_edit_{ceid}"] = False
+                            st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                # ── Inline Edit form — Vendor UB payment (detach on save) ──
+                # Editing breaks the link to the vendor ledger: the row is
+                # converted to a plain Manual entry and the vendor payment is
+                # left untouched. Date + amount only; vendor name is read-only.
+                if is_vendor_ub and st.session_state.get(f"cih_edit_{ceid}"):
+                    st.markdown(
+                        '<div style="background:#1a1810;border:1px solid #2a2820;'
+                        'border-radius:8px;padding:0.8rem 1rem;margin-bottom:0.4rem">',
+                        unsafe_allow_html=True)
+                    st.markdown(
+                        f"**✏️ Edit Vendor Payment #{ceid}** "
+                        f'<span style="font-size:0.72rem;color:#d4864a">'
+                        f'— saving unlinks this from the Vendor ledger</span>',
+                        unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div style="font-size:0.78rem;color:#8a8070;'
+                        f'margin-bottom:0.5rem">Vendor: '
+                        f'<b>{h(str(crow["details"] or ""))}</b></div>',
+                        unsafe_allow_html=True)
+                    vcef1, vcef2 = st.columns(2)
+                    with vcef1:
+                        vcne_date = st.date_input(
+                            "Date",
+                            value=date.fromisoformat(str(crow["entry_date"])),
+                            key=f"cih_efd_{ceid}")
+                    with vcef2:
+                        vcne_amt = st.number_input(
+                            "Amount (₹)", min_value=0.01,
+                            value=float(crow["amount"]), step=100.0,
+                            format="%.2f", key=f"cih_efa_{ceid}")
+                    vcefs1, vcefs2, _ = st.columns([1, 1, 4])
+                    with vcefs1:
+                        if st.button("💾 Save", key=f"cih_efsv_{ceid}",
+                                     use_container_width=True):
+                            try:
+                                with conn:
+                                    conn.execute(
+                                        "UPDATE cash_in_hand_entries SET "
+                                        "entry_date=%s,amount=%s,"
+                                        "source_type=%s,source_id=NULL "
+                                        "WHERE entry_id=%s",
+                                        (str(vcne_date), round(vcne_amt, 2),
+                                         SRC_MANUAL, ceid))
+                                st.session_state[f"cih_edit_{ceid}"] = False
+                                st.success("Entry updated and unlinked from the "
+                                           "vendor payment.")
+                                clear_passbook_cache()
+                                st.rerun()
+                            except Exception as _e:
+                                conn.rollback()
+                                st.error(f"Failed to update entry: {_e}")
+                    with vcefs2:
                         if st.button("✕ Cancel", key=f"cih_efcx_{ceid}",
                                      use_container_width=True):
                             st.session_state[f"cih_edit_{ceid}"] = False
